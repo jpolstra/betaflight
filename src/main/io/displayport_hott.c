@@ -23,7 +23,8 @@
 #include <string.h>
 
 #include "platform.h"
-#if defined (USE_HOTT_TEXTMODE) && defined (USE_CMS)
+
+#if defined(USE_HOTT_TEXTMODE) && defined(USE_CMS)
 
 #include "common/utils.h"
 #include "cms/cms.h"
@@ -31,7 +32,7 @@
 
 displayPort_t hottDisplayPort;
 
-static int hottDrawScreen(displayPort_t *displayPort)
+static bool hottDrawScreen(displayPort_t *displayPort)
 {
     UNUSED(displayPort);
     return 0;
@@ -42,27 +43,32 @@ static int hottScreenSize(const displayPort_t *displayPort)
     return displayPort->rows * displayPort->cols;
 }
 
-static int hottWriteChar(displayPort_t *displayPort, uint8_t col, uint8_t row, uint8_t c)
+static int hottWriteChar(displayPort_t *displayPort, uint8_t col, uint8_t row, uint8_t attr, uint8_t c)
 {
     UNUSED(displayPort);
+    UNUSED(attr);
 
     hottTextmodeWriteChar(col, row, c);
     return 0;
 }
 
-static int hottWriteString(displayPort_t *displayPort, uint8_t col, uint8_t row, const char *s)
+static int hottWriteString(displayPort_t *displayPort, uint8_t col, uint8_t row, uint8_t attr, const char *s)
 {
+    UNUSED(attr);
+
     while (*s) {
-        hottWriteChar(displayPort,  col++, row, *(s++));
+        hottWriteChar(displayPort,  col++, row, DISPLAYPORT_SEVERITY_NORMAL, *(s++));
     }
     return 0;
 }
 
-static int hottClearScreen(displayPort_t *displayPort)
+static int hottClearScreen(displayPort_t *displayPort, displayClearOption_e options)
 {
+    UNUSED(options);
+
     for (int row = 0; row < displayPort->rows; row++) {
         for (int col= 0; col < displayPort->cols; col++) {
-            hottWriteChar(displayPort, col, row, ' ');
+            hottWriteChar(displayPort, col, row, DISPLAYPORT_SEVERITY_NORMAL, ' ');
         }
     }
     return 0;
@@ -83,7 +89,7 @@ static int hottHeartbeat(displayPort_t *displayPort)
     return 0;
 }
 
-static void hottResync(displayPort_t *displayPort)
+static void hottRedraw(displayPort_t *displayPort)
 {
     UNUSED(displayPort);
 }
@@ -103,7 +109,7 @@ static int hottGrab(displayPort_t *displayPort)
 static int hottRelease(displayPort_t *displayPort)
 {
     int cnt = displayPort->grabCount = 0;
-    hottClearScreen(displayPort);
+    hottClearScreen(displayPort, DISPLAY_CLEAR_WAIT);
     hottTextmodeExit();
     return cnt;
 }
@@ -118,26 +124,29 @@ static const displayPortVTable_t hottVTable = {
     .writeChar = hottWriteChar,
     .isTransferInProgress = hottIsTransferInProgress,
     .heartbeat = hottHeartbeat,
-    .resync = hottResync,
-    .txBytesFree = hottTxBytesFree
+    .redraw = hottRedraw,
+    .txBytesFree = hottTxBytesFree,
+    .layerSupported = NULL,
+    .layerSelect = NULL,
+    .layerCopy = NULL,
 };
 
-displayPort_t *displayPortHottInit()
+static displayPort_t *displayPortHottInit(void)
 {
     hottDisplayPort.device = NULL;
-    displayInit(&hottDisplayPort, &hottVTable);
+    displayInit(&hottDisplayPort, &hottVTable, DISPLAYPORT_DEVICE_TYPE_HOTT);
     hottDisplayPort.useFullscreen = true;
     hottDisplayPort.rows = HOTT_TEXTMODE_DISPLAY_ROWS;
     hottDisplayPort.cols = HOTT_TEXTMODE_DISPLAY_COLUMNS;
     return &hottDisplayPort;
 }
 
-void hottDisplayportRegister()
+void hottDisplayportRegister(void)
 {
     cmsDisplayPortRegister(displayPortHottInit());
 }
 
-void hottCmsOpen()
+void hottCmsOpen(void)
 {
     if (!cmsInMenu) {
         cmsDisplayPortSelect(&hottDisplayPort);

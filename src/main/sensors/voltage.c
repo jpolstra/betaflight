@@ -18,9 +18,10 @@
  * If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdbool.h"
-#include "stdint.h"
-#include "string.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "platform.h"
 
@@ -30,9 +31,13 @@
 #include "common/maths.h"
 #include "common/utils.h"
 
+#include "config/config.h"
 #include "config/config_reset.h"
 
 #include "drivers/adc.h"
+
+#include "flight/mixer.h"
+#include "flight/pid.h"
 
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
@@ -84,34 +89,44 @@ const uint8_t supportedVoltageMeterCount = ARRAYLEN(voltageMeterIds);
 
 void voltageMeterReset(voltageMeter_t *meter)
 {
-    meter->filtered = 0;
+    meter->displayFiltered = 0;
+    meter->voltageStablePrevFiltered = 0;
+    meter->voltageStableLastUpdate = 0;
+    meter->voltageStableBits = 0;
     meter->unfiltered = 0;
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+    meter->sagFiltered = 0;
+#endif
 }
 //
 // ADC
 //
 
-#ifndef VBAT_SCALE_DEFAULT
-#define VBAT_SCALE_DEFAULT 110
+#ifndef DEFAULT_VOLTAGE_METER_SCALE
+#define DEFAULT_VOLTAGE_METER_SCALE 110
 #endif
 
-#ifndef VBAT_RESDIVVAL_DEFAULT
-#define VBAT_RESDIVVAL_DEFAULT 10
+#ifndef DEFAULT_VOLTAGE_METER_DIVIDER
+#define DEFAULT_VOLTAGE_METER_DIVIDER 10
 #endif
 
-#ifndef VBAT_RESDIVMULTIPLIER_DEFAULT
-#define VBAT_RESDIVMULTIPLIER_DEFAULT 1
+#ifndef DEFAULT_VOLTAGE_METER_MULTIPLIER
+#define DEFAULT_VOLTAGE_METER_MULTIPLIER 1
 #endif
 
 typedef struct voltageMeterADCState_s {
-    uint16_t voltageFiltered;         // battery voltage in 0.01V steps (filtered)
+    uint16_t voltageDisplayFiltered;         // battery voltage in 0.01V steps (filtered)
     uint16_t voltageUnfiltered;       // battery voltage in 0.01V steps (unfiltered)
-    pt1Filter_t filter;
+    pt1Filter_t displayFilter;
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+    uint16_t voltageSagFiltered;      // battery voltage in 0.01V steps (filtered for vbat sag compensation)
+    pt1Filter_t sagFilter;            // filter for vbat sag compensation
+#endif
 } voltageMeterADCState_t;
 
-extern voltageMeterADCState_t voltageMeterADCStates[MAX_VOLTAGE_SENSOR_ADC];
-
 voltageMeterADCState_t voltageMeterADCStates[MAX_VOLTAGE_SENSOR_ADC];
+
+static bool sagCompensationConfigured;
 
 voltageMeterADCState_t *getVoltageMeterADC(uint8_t index)
 {
@@ -124,9 +139,9 @@ void pgResetFn_voltageSensorADCConfig(voltageSensorADCConfig_t *instance)
 {
     for (int i = 0; i < MAX_VOLTAGE_SENSOR_ADC; i++) {
         RESET_CONFIG(voltageSensorADCConfig_t, &instance[i],
-            .vbatscale = VBAT_SCALE_DEFAULT,
-            .vbatresdivval = VBAT_RESDIVVAL_DEFAULT,
-            .vbatresdivmultiplier = VBAT_RESDIVMULTIPLIER_DEFAULT,
+            .vbatscale = DEFAULT_VOLTAGE_METER_SCALE,
+            .vbatresdivval = DEFAULT_VOLTAGE_METER_DIVIDER,
+            .vbatresdivmultiplier = DEFAULT_VOLTAGE_METER_MULTIPLIER,
         );
     }
 }
@@ -163,17 +178,26 @@ void voltageMeterADCRefresh(void)
 
         uint8_t channel = voltageMeterAdcChannelMap[i];
         uint16_t rawSample = adcGetChannel(channel);
-
-        uint16_t filteredSample = pt1FilterApply(&state->filter, rawSample);
+        uint16_t filteredDisplaySample = pt1FilterApply(&state->displayFilter, rawSample);
 
         // always calculate the latest voltage, see getLatestVoltage() which does the calculation on demand.
-        state->voltageFiltered = voltageAdcToVoltage(filteredSample, config);
+        state->voltageDisplayFiltered = voltageAdcToVoltage(filteredDisplaySample, config);
         state->voltageUnfiltered = voltageAdcToVoltage(rawSample, config);
+
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+        if (isSagCompensationConfigured()) {
+            uint16_t filteredSagSample = pt1FilterApply(&state->sagFilter, rawSample);
+            state->voltageSagFiltered = voltageAdcToVoltage(filteredSagSample, config);
+        }
+#endif
 #else
         UNUSED(voltageAdcToVoltage);
 
-        state->voltageFiltered = 0;
+        state->voltageDisplayFiltered = 0;
         state->voltageUnfiltered = 0;
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+        state->voltageSagFiltered = 0;
+#endif
 #endif
     }
 }
@@ -182,8 +206,16 @@ void voltageMeterADCRead(voltageSensorADC_e adcChannel, voltageMeter_t *voltageM
 {
     voltageMeterADCState_t *state = &voltageMeterADCStates[adcChannel];
 
-    voltageMeter->filtered = state->voltageFiltered;
+    voltageMeter->displayFiltered = state->voltageDisplayFiltered;
     voltageMeter->unfiltered = state->voltageUnfiltered;
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+    voltageMeter->sagFiltered = state->voltageSagFiltered;
+#endif
+}
+
+bool isSagCompensationConfigured(void)
+{
+    return sagCompensationConfigured;
 }
 
 void voltageMeterADCInit(void)
@@ -194,8 +226,25 @@ void voltageMeterADCInit(void)
         voltageMeterADCState_t *state = &voltageMeterADCStates[i];
         memset(state, 0, sizeof(voltageMeterADCState_t));
 
-        pt1FilterInit(&state->filter, pt1FilterGain(GET_BATTERY_LPF_FREQUENCY(batteryConfig()->vbatLpfPeriod), HZ_TO_INTERVAL(50)));
+        pt1FilterInit(&state->displayFilter, pt1FilterGain(GET_BATTERY_LPF_FREQUENCY(batteryConfig()->vbatDisplayLpfPeriod), HZ_TO_INTERVAL(isSagCompensationConfigured() ? FAST_VOLTAGE_TASK_FREQ_HZ : SLOW_VOLTAGE_TASK_FREQ_HZ)));
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+        if (isSagCompensationConfigured()) {
+            pt1FilterInit(&state->sagFilter, pt1FilterGain(GET_BATTERY_LPF_FREQUENCY(batteryConfig()->vbatSagLpfPeriod), HZ_TO_INTERVAL(FAST_VOLTAGE_TASK_FREQ_HZ)));
+        }
+#endif
     }
+}
+
+void voltageMeterGenericInit(void)
+{
+    sagCompensationConfigured = false;
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+    for (unsigned i = 0; i < PID_PROFILE_COUNT; i++) {
+        if (pidProfiles(i)->vbat_sag_compensation > 0 && !RPM_LIMIT_ACTIVE) {
+            sagCompensationConfigured = true;
+        }
+    }
+#endif
 }
 
 //
@@ -204,9 +253,9 @@ void voltageMeterADCInit(void)
 
 #ifdef USE_ESC_SENSOR
 typedef struct voltageMeterESCState_s {
-    uint16_t voltageFiltered;         // battery voltage in 0.01V steps (filtered)
+    uint16_t voltageDisplayFiltered;         // battery voltage in 0.01V steps (filtered)
     uint16_t voltageUnfiltered;       // battery voltage in 0.01V steps (unfiltered)
-    pt1Filter_t filter;
+    pt1Filter_t displayFilter;
 } voltageMeterESCState_t;
 
 static voltageMeterESCState_t voltageMeterESCState;
@@ -218,7 +267,7 @@ void voltageMeterESCInit(void)
 {
 #ifdef USE_ESC_SENSOR
     memset(&voltageMeterESCState, 0, sizeof(voltageMeterESCState_t));
-    pt1FilterInit(&voltageMeterESCState.filter, pt1FilterGain(GET_BATTERY_LPF_FREQUENCY(batteryConfig()->vbatLpfPeriod), HZ_TO_INTERVAL(50)));
+    pt1FilterInit(&voltageMeterESCState.displayFilter, pt1FilterGain(GET_BATTERY_LPF_FREQUENCY(batteryConfig()->vbatDisplayLpfPeriod), HZ_TO_INTERVAL(isSagCompensationConfigured() ? FAST_VOLTAGE_TASK_FREQ_HZ : SLOW_VOLTAGE_TASK_FREQ_HZ)));
 #endif
 }
 
@@ -228,7 +277,7 @@ void voltageMeterESCRefresh(void)
     escSensorData_t *escData = getEscSensorData(ESC_SENSOR_COMBINED);
     if (escData) {
         voltageMeterESCState.voltageUnfiltered = escData->dataAge <= ESC_BATTERY_AGE_MAX ? escData->voltage : 0;
-        voltageMeterESCState.voltageFiltered = pt1FilterApply(&voltageMeterESCState.filter, voltageMeterESCState.voltageUnfiltered);
+        voltageMeterESCState.voltageDisplayFiltered = pt1FilterApply(&voltageMeterESCState.displayFilter, voltageMeterESCState.voltageUnfiltered);
     }
 #endif
 }
@@ -242,7 +291,7 @@ void voltageMeterESCReadMotor(uint8_t motorNumber, voltageMeter_t *voltageMeter)
     escSensorData_t *escData = getEscSensorData(motorNumber);
     if (escData) {
         voltageMeter->unfiltered = escData->dataAge <= ESC_BATTERY_AGE_MAX ? escData->voltage : 0;
-        voltageMeter->filtered = voltageMeter->unfiltered; // no filtering for ESC motors currently.
+        voltageMeter->displayFiltered = voltageMeter->unfiltered; // no filtering for ESC motors currently.
     } else {
         voltageMeterReset(voltageMeter);
     }
@@ -255,7 +304,7 @@ void voltageMeterESCReadCombined(voltageMeter_t *voltageMeter)
 #ifndef USE_ESC_SENSOR
     voltageMeterReset(voltageMeter);
 #else
-    voltageMeter->filtered = voltageMeterESCState.voltageFiltered;
+    voltageMeter->displayFiltered = voltageMeterESCState.voltageDisplayFiltered;
     voltageMeter->unfiltered = voltageMeterESCState.voltageUnfiltered;
 #endif
 }
@@ -313,4 +362,29 @@ void voltageMeterRead(voltageMeterId_e id, voltageMeter_t *meter)
     {
         voltageMeterReset(meter);
     }
+}
+
+// update voltageStableBits
+// new 1 bit (= stable) is shifted in every VOLTAGE_STABLE_UPDATE_MS
+// when difference is larger than VOLTAGE_STABLE_MAX_DELTA, LSB of shift register is
+//   reset to 0 (logical AND) and voltageStablePrevFiltered is updated with new voltage value
+void voltageStableUpdate(voltageMeter_t* vm)
+{
+    const uint32_t now = millis();
+    // test voltage on each call
+    if (abs(vm->voltageStablePrevFiltered - vm->displayFiltered) > VOLTAGE_STABLE_MAX_DELTA) {
+        // reset stable voltage reference
+        vm->voltageStablePrevFiltered = vm->displayFiltered;
+        vm->voltageStableBits &= ~BIT(0);  // voltage threshold exceeded in this period, clear LSB/BIT(0)
+    }
+    if (cmp32(now, vm->voltageStableLastUpdate) >= VOLTAGE_STABLE_TICK_MS) {
+        vm->voltageStableBits = (vm->voltageStableBits << 1) | BIT(0);  // start with 'stable' state
+        vm->voltageStableLastUpdate = now;
+    }
+}
+
+// voltage is stable when it was within VOLTAGE_STABLE_MAX_DELTA for 10 update periods
+bool voltageIsStable(voltageMeter_t* vm)
+{
+    return __builtin_popcount(vm->voltageStableBits & (BIT(VOLTAGE_STABLE_BITS_TOTAL + 1) - 1)) >= VOLTAGE_STABLE_BITS_THRESHOLD;
 }

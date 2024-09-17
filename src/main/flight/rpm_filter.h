@@ -20,27 +20,13 @@
 
 #pragma once
 
-#include "common/axis.h"
-#include "pg/pg.h"
+#include <stdbool.h>
 
-typedef struct rpmFilterConfig_s
-{
-    uint8_t  gyro_rpm_notch_harmonics;   // how many harmonics should be covered with notches? 0 means filter off
-    uint8_t  gyro_rpm_notch_min;         // minimum frequency of the notches
-    uint16_t gyro_rpm_notch_q;           // q of the notches
+#include "common/time.h"
 
-    uint8_t  dterm_rpm_notch_harmonics;  // how many harmonics should be covered with notches? 0 means filter off
-    uint8_t  dterm_rpm_notch_min;        // minimum frequency of the notches
-    uint16_t dterm_rpm_notch_q;          // q of the notches
+#include "pg/rpm_filter.h"
 
-    uint16_t rpm_lpf;                    // the cutoff of the lpf on reported motor rpm
-} rpmFilterConfig_t;
-
-PG_DECLARE(rpmFilterConfig_t, rpmFilterConfig);
-
-void  rpmFilterInit(const rpmFilterConfig_t *config);
-float rpmFilterGyro(int axis, float values);
-float rpmFilterDterm(int axis, float values);
-void  rpmFilterUpdate();
+void rpmFilterInit(const rpmFilterConfig_t *config, const timeUs_t looptimeUs);
+void rpmFilterUpdate(void);
+float rpmFilterApply(const int axis, float value);
 bool isRpmFilterEnabled(void);
-float rpmMinMotorFrequency();

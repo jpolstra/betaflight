@@ -26,6 +26,7 @@
 
 extern "C" {
     #include "common/maths.h"
+    #include "common/vector.h"
 }
 
 #include "unittest_macros.h"
@@ -195,34 +196,11 @@ TEST(MathsUnittest, TestApplyDeadband)
     EXPECT_EQ(applyDeadband(-11, 10), -1);
 }
 
-void expectVectorsAreEqual(struct fp_vector *a, struct fp_vector *b, float absTol)
+void expectVectorsAreEqual(vector3_t *a, vector3_t *b, float absTol)
 {
-    EXPECT_NEAR(a->X, b->X, absTol);
-    EXPECT_NEAR(a->Y, b->Y, absTol);
-    EXPECT_NEAR(a->Z, b->Z, absTol);
-}
-
-TEST(MathsUnittest, TestRotateVectorWithNoAngle)
-{
-    fp_vector vector = {1.0f, 0.0f, 0.0f};
-    fp_angles_t euler_angles = {.raw={0.0f, 0.0f, 0.0f}};
-
-    rotateV(&vector, &euler_angles);
-    fp_vector expected_result = {1.0f, 0.0f, 0.0f};
-
-    expectVectorsAreEqual(&vector, &expected_result, 1e-5);
-}
-
-TEST(MathsUnittest, TestRotateVectorAroundAxis)
-{
-    // Rotate a vector <1, 0, 0> around an each axis x y and z.
-    fp_vector vector = {1.0f, 0.0f, 0.0f};
-    fp_angles_t euler_angles = {.raw={90.0f, 0.0f, 0.0f}};
-
-    rotateV(&vector, &euler_angles);
-    fp_vector expected_result = {1.0f, 0.0f, 0.0f};
-
-    expectVectorsAreEqual(&vector, &expected_result, 1e-5);
+    EXPECT_NEAR(a->x, b->x, absTol);
+    EXPECT_NEAR(a->y, b->y, absTol);
+    EXPECT_NEAR(a->z, b->z, absTol);
 }
 
 #if defined(FAST_MATH) || defined(VERY_FAST_MATH)
@@ -230,8 +208,8 @@ TEST(MathsUnittest, TestFastTrigonometrySinCos)
 {
     double sinError = 0;
     for (float x = -10 * M_PI; x < 10 * M_PI; x += M_PI / 300) {
-        double approxResult = sin_approx(x);
-        double libmResult = sinf(x);
+        float approxResult = sin_approx(x);
+        double libmResult = sin(x);
         sinError = MAX(sinError, fabs(approxResult - libmResult));
     }
     printf("sin_approx maximum absolute error = %e\n", sinError);
@@ -239,8 +217,8 @@ TEST(MathsUnittest, TestFastTrigonometrySinCos)
 
     double cosError = 0;
     for (float x = -10 * M_PI; x < 10 * M_PI; x += M_PI / 300) {
-        double approxResult = cos_approx(x);
-        double libmResult = cosf(x);
+        float approxResult = cos_approx(x);
+        double libmResult = cos(x);
         cosError = MAX(cosError, fabs(approxResult - libmResult));
     }
     printf("cos_approx maximum absolute error = %e\n", cosError);
@@ -252,8 +230,8 @@ TEST(MathsUnittest, TestFastTrigonometryATan2)
     double error = 0;
     for (float x = -1.0f; x < 1.0f; x += 0.01) {
         for (float y = -1.0f; x < 1.0f; x += 0.001) {
-            double approxResult = atan2_approx(y, x);
-            double libmResult = atan2f(y, x);
+            float approxResult = atan2_approx(y, x);
+            double libmResult = atan2(y, x);
             error = MAX(error, fabs(approxResult - libmResult));
         }
     }
@@ -265,7 +243,7 @@ TEST(MathsUnittest, TestFastTrigonometryACos)
 {
     double error = 0;
     for (float x = -1.0f; x < 1.0f; x += 0.001) {
-        double approxResult = acos_approx(x);
+        float approxResult = acos_approx(x);
         double libmResult = acos(x);
         error = MAX(error, fabs(approxResult - libmResult));
     }

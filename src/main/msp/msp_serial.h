@@ -21,6 +21,9 @@
 #pragma once
 
 #include "drivers/time.h"
+
+#include "io/serial.h"
+
 #include "msp/msp.h"
 
 // Each MSP port requires state and a receive buffer, revisit this default if someone needs more than 3 MSP ports.
@@ -65,16 +68,14 @@ typedef enum {
 } mspPendingSystemRequest_e;
 
 #define MSP_PORT_INBUF_SIZE 192
+#define MSP_PORT_OUTBUF_SIZE_MIN 512 // As of 2021/08/10 MSP_BOXNAMES generates a 307 byte response for page 1. There has been overflow issues with 320 byte buffer.
+
 #ifdef USE_FLASHFS
-#ifdef STM32F1
-#define MSP_PORT_DATAFLASH_BUFFER_SIZE 1024
-#else
 #define MSP_PORT_DATAFLASH_BUFFER_SIZE 4096
-#endif
 #define MSP_PORT_DATAFLASH_INFO_SIZE 16
 #define MSP_PORT_OUTBUF_SIZE (MSP_PORT_DATAFLASH_BUFFER_SIZE + MSP_PORT_DATAFLASH_INFO_SIZE)
 #else
-#define MSP_PORT_OUTBUF_SIZE 256
+#define MSP_PORT_OUTBUF_SIZE MSP_PORT_OUTBUF_SIZE_MIN // As of 2021/08/10 MSP_BOXNAMES generates a 307 byte response for page 1.
 #endif
 
 typedef struct __attribute__((packed)) {
@@ -110,6 +111,7 @@ typedef struct mspPort_s {
     uint8_t checksum1;
     uint8_t checksum2;
     bool sharedWithTelemetry;
+    mspDescriptor_t descriptor;
 } mspPort_t;
 
 void mspSerialInit(void);
@@ -118,5 +120,6 @@ void mspSerialProcess(mspEvaluateNonMspData_e evaluateNonMspData, mspProcessComm
 void mspSerialAllocatePorts(void);
 void mspSerialReleasePortIfAllocated(struct serialPort_s *serialPort);
 void mspSerialReleaseSharedTelemetryPorts(void);
-int mspSerialPush(uint8_t cmd, uint8_t *data, int datalen, mspDirection_e direction);
+mspDescriptor_t getMspSerialPortDescriptor(const uint8_t portIdentifier);
+int mspSerialPush(serialPortIdentifier_e port, uint8_t cmd, uint8_t *data, int datalen, mspDirection_e direction, mspVersion_e mspVersion);
 uint32_t mspSerialTxBytesFree(void);

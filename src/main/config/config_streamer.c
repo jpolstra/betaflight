@@ -23,8 +23,9 @@
 #include "platform.h"
 
 #include "drivers/system.h"
-#include "drivers/flash.h"
+#include "drivers/flash/flash.h"
 
+#include "config/config_eeprom.h"
 #include "config/config_streamer.h"
 
 #if !defined(CONFIG_IN_FLASH)
@@ -36,48 +37,8 @@ uint8_t eepromData[EEPROM_SIZE];
 #endif
 
 
-#if defined(STM32H750xx) && !(defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_RAM) || defined(CONFIG_IN_SDCARD))
-#error "STM32750xx only has one flash page which contains the bootloader, no spare flash pages available, use external storage for persistent config or ram for target testing"
-#endif
-// @todo this is not strictly correct for F4/F7, where sector sizes are variable
 #if !defined(FLASH_PAGE_SIZE)
-// F1
-# if defined(STM32F10X_MD)
-#  define FLASH_PAGE_SIZE                 (0x400)
-# elif defined(STM32F10X_HD)
-#  define FLASH_PAGE_SIZE                 (0x800)
-// F3
-# elif defined(STM32F303xC)
-#  define FLASH_PAGE_SIZE                 (0x800)
-// F4
-# elif defined(STM32F40_41xxx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x4000) // 16K sectors
-# elif defined (STM32F411xE)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x4000)
-# elif defined(STM32F427_437xx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x4000)
-# elif defined (STM32F446xx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x4000)
-// F7
-#elif defined(STM32F722xx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x4000) // 16K sectors
-# elif defined(STM32F745xx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x8000) // 32K sectors
-# elif defined(STM32F746xx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x8000)
-# elif defined(STM32F765xx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x8000)
-# elif defined(UNIT_TEST)
-#  define FLASH_PAGE_SIZE                 (0x400)
-// H7
-# elif defined(STM32H743xx) || defined(STM32H750xx)
-#  define FLASH_PAGE_SIZE                 ((uint32_t)0x20000) // 128K sectors
-// SIMULATOR
-# elif defined(SIMULATOR_BUILD)
-#  define FLASH_PAGE_SIZE                 (0x400)
-# else
-#  error "Flash page size not defined for target."
-# endif
+#error "Flash page size not defined for target."
 #endif
 
 void config_streamer_init(config_streamer_t *c)
@@ -94,8 +55,12 @@ void config_streamer_start(config_streamer_t *c, uintptr_t base, int size)
 #if defined(CONFIG_IN_RAM) || defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_SDCARD)
         // NOP
 #elif defined(CONFIG_IN_FLASH) || defined(CONFIG_IN_FILE)
-#if defined(STM32F7) || defined(STM32H7)
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4)
         HAL_FLASH_Unlock();
+#elif defined(APM32F4)
+        DAL_FLASH_Unlock();
+#elif defined(AT32F4)
+        flash_unlock();
 #else
         FLASH_Unlock();
 #endif
@@ -106,16 +71,18 @@ void config_streamer_start(config_streamer_t *c, uintptr_t base, int size)
 #if defined(CONFIG_IN_RAM) || defined(CONFIG_IN_FILE) || defined(CONFIG_IN_EXTERNAL_FLASH)
     // NOP
 #elif defined(CONFIG_IN_FLASH)
-#if defined(STM32F10X)
-    FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_PGERR | FLASH_FLAG_WRPRTERR);
-#elif defined(STM32F303)
-    FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_PGERR | FLASH_FLAG_WRPERR);
-#elif defined(STM32F4)
+#if defined(STM32F4)
     FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
 #elif defined(STM32F7)
     // NOP
 #elif defined(STM32H7)
     // NOP
+#elif defined(STM32G4)
+    // NOP
+#elif defined(AT32F4)
+    flash_flag_clear(FLASH_ODF_FLAG | FLASH_PRGMERR_FLAG | FLASH_EPPERR_FLAG);
+#elif defined(APM32F4)
+    __DAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR | FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
 #elif defined(UNIT_TEST) || defined(SIMULATOR_BUILD)
     // NOP
 #else
@@ -267,64 +234,69 @@ static uint32_t getFLASHSectorForEEPROM(void)
     }
 }
 
-#elif defined(STM32H743xx)
+#elif defined(STM32H743xx) || defined(STM32G4) || defined(STM32H7A3xx) || defined(STM32H7A3xxQ) || defined(STM32H723xx) || defined(STM32H725xx)
 /*
-There are two banks of 8 of 128K sectors (up to 2MB flash)
+MCUs with uniform array of equal size sectors, handled in two banks having contiguous address.
+(Devices with non-contiguous flash layout is not currently useful anyways.)
 
-Bank 1
-Sector 0    0x08000000 - 0x0801FFFF 128 Kbytes
-Sector 1    0x08020000 - 0x0803FFFF 128 Kbytes
-Sector 2    0x08040000 - 0x0805FFFF 128 Kbytes
-Sector 3    0x08060000 - 0x0807FFFF 128 Kbytes
-Sector 4    0x08080000 - 0x0809FFFF 128 Kbytes
-Sector 5    0x080A0000 - 0x080BFFFF 128 Kbytes
-Sector 6    0x080C0000 - 0x080DFFFF 128 Kbytes
-Sector 7    0x080E0000 - 0x080FFFFF 128 Kbytes
+H743
+2 bank * 8 sector/bank * 128K/sector (2MB)
+Bank 1 0x08000000 - 0x080FFFFF 128KB * 8
+Bank 2 0x08100000 - 0x081FFFFF 128KB * 8
 
-Bank 2
-Sector 0    0x08100000 - 0x0811FFFF 128 Kbytes
-Sector 1    0x08120000 - 0x0813FFFF 128 Kbytes
-Sector 2    0x08140000 - 0x0815FFFF 128 Kbytes
-Sector 3    0x08160000 - 0x0817FFFF 128 Kbytes
-Sector 4    0x08180000 - 0x0819FFFF 128 Kbytes
-Sector 5    0x081A0000 - 0x081BFFFF 128 Kbytes
-Sector 6    0x081C0000 - 0x081DFFFF 128 Kbytes
-Sector 7    0x081E0000 - 0x081FFFFF 128 Kbytes
+H743
+1 bank * 8 sector/bank * 128K/sector (1MB)
+Bank 1 0x08000000 - 0x080FFFFF 128KB * 8
 
+H7A3
+2 bank * 128 sector/bank * 8KB/sector (2MB)
+Bank 1 0x08000000 - 0x080FFFFF 8KB * 128
+Bank 2 0x08100000 - 0x081FFFFF 8KB * 128
+
+G473/474 in dual bank mode
+2 bank * 128 sector/bank * 2KB/sector (512KB)
+Bank 1 0x08000000 - 0x0803FFFF 2KB * 128
+Bank 2 0x08040000 - 0x0807FFFF 2KB * 128
+
+Note that FLASH_BANK_SIZE constant used in the following code changes depending on
+bank operation mode. The code assumes dual bank operation, in which case the
+FLASH_BANK_SIZE constant is set to one half of the available flash size in HAL.
 */
 
-static void getFLASHSectorForEEPROM(uint32_t *bank, uint32_t *sector)
-{
-    uint32_t start = (uint32_t)&__config_start;
+#if defined(STM32H743xx) || defined(STM32H723xx) || defined(STM32H725xx)
+#define FLASH_PAGE_PER_BANK 8
+#elif defined(STM32H7A3xx) || defined(STM32H7A3xxQ)
+#define FLASH_PAGE_PER_BANK 128
+#elif defined(STM32G4)
+#define FLASH_PAGE_PER_BANK 128
+// These are not defined in CMSIS like H7
+#define FLASH_BANK1_BASE FLASH_BASE
+#define FLASH_BANK2_BASE (FLASH_BANK1_BASE + FLASH_BANK_SIZE)
+#endif
 
-    if (start >= FLASH_BANK1_BASE && start < FLASH_BANK2_BASE) {
+static void getFLASHSectorForEEPROM(uint32_t address, uint32_t *bank, uint32_t *sector)
+{
+#if defined(FLASH_BANK2_BASE)
+    if (address >= FLASH_BANK1_BASE && address < FLASH_BANK2_BASE) {
         *bank = FLASH_BANK_1;
-    } else if (start >= FLASH_BANK2_BASE && start < FLASH_BANK2_BASE + 0x100000) {
+    } else if (address >= FLASH_BANK2_BASE && address < FLASH_BANK2_BASE + FLASH_BANK_SIZE) {
         *bank = FLASH_BANK_2;
-        start -= 0x100000;
-    } else {
+        address -= FLASH_BANK_SIZE;
+    }
+#else
+    if (address >= FLASH_BANK1_BASE && address < FLASH_BANK1_BASE + FLASH_BANK_SIZE) {
+        *bank = FLASH_BANK_1;
+    }
+#endif
+    else {
         // Not good
         while (1) {
             failureMode(FAILURE_CONFIG_STORE_FAILURE);
         }
     }
 
-    if (start <= 0x0801FFFF)
-        *sector = FLASH_SECTOR_0;
-    else if (start <= 0x0803FFFF)
-        *sector = FLASH_SECTOR_1;
-    else if (start <= 0x0805FFFF)
-        *sector = FLASH_SECTOR_2;
-    else if (start <= 0x0807FFFF)
-        *sector = FLASH_SECTOR_3;
-    else if (start <= 0x0809FFFF)
-        *sector = FLASH_SECTOR_4;
-    else if (start <= 0x080BFFFF)
-        *sector = FLASH_SECTOR_5;
-    else if (start <= 0x080DFFFF)
-        *sector = FLASH_SECTOR_6;
-    else if (start <= 0x080FFFFF)
-        *sector = FLASH_SECTOR_7;
+    address -= FLASH_BANK1_BASE;
+    *sector = address / FLASH_PAGE_SIZE;
 }
 #elif defined(STM32H750xx)
 /*
@@ -351,8 +323,57 @@ static void getFLASHSectorForEEPROM(uint32_t *bank, uint32_t *sector)
         }
     }
 }
+#elif defined(APM32F4)
+/*
+Sector 0    0x08000000 - 0x08003FFF 16 Kbytes
+Sector 1    0x08004000 - 0x08007FFF 16 Kbytes
+Sector 2    0x08008000 - 0x0800BFFF 16 Kbytes
+Sector 3    0x0800C000 - 0x0800FFFF 16 Kbytes
+Sector 4    0x08010000 - 0x0801FFFF 64 Kbytes
+Sector 5    0x08020000 - 0x0803FFFF 128 Kbytes
+Sector 6    0x08040000 - 0x0805FFFF 128 Kbytes
+Sector 7    0x08060000 - 0x0807FFFF 128 Kbytes
+Sector 8    0x08080000 - 0x0809FFFF 128 Kbytes
+Sector 9    0x080A0000 - 0x080BFFFF 128 Kbytes
+Sector 10   0x080C0000 - 0x080DFFFF 128 Kbytes
+Sector 11   0x080E0000 - 0x080FFFFF 128 Kbytes
+*/
+
+static uint32_t getFLASHSectorForEEPROM(void)
+{
+    if ((uint32_t)&__config_start <= 0x08003FFF)
+        return FLASH_SECTOR_0;
+    if ((uint32_t)&__config_start <= 0x08007FFF)
+        return FLASH_SECTOR_1;
+    if ((uint32_t)&__config_start <= 0x0800BFFF)
+        return FLASH_SECTOR_2;
+    if ((uint32_t)&__config_start <= 0x0800FFFF)
+        return FLASH_SECTOR_3;
+    if ((uint32_t)&__config_start <= 0x0801FFFF)
+        return FLASH_SECTOR_4;
+    if ((uint32_t)&__config_start <= 0x0803FFFF)
+        return FLASH_SECTOR_5;
+    if ((uint32_t)&__config_start <= 0x0805FFFF)
+        return FLASH_SECTOR_6;
+    if ((uint32_t)&__config_start <= 0x0807FFFF)
+        return FLASH_SECTOR_7;
+    if ((uint32_t)&__config_start <= 0x0809FFFF)
+        return FLASH_SECTOR_8;
+    if ((uint32_t)&__config_start <= 0x080DFFFF)
+        return FLASH_SECTOR_9;
+    if ((uint32_t)&__config_start <= 0x080BFFFF)
+        return FLASH_SECTOR_10;
+    if ((uint32_t)&__config_start <= 0x080FFFFF)
+        return FLASH_SECTOR_11;
+
+    // Not good
+    while (1) {
+        failureMode(FAILURE_CONFIG_STORE_FAILURE);
+    }
+}
+
 #endif
-#endif
+#endif // CONFIG_IN_FLASH
 
 // FIXME the return values are currently magic numbers
 static int write_word(config_streamer_t *c, config_streamer_buffer_align_type_t *buffer)
@@ -377,6 +398,8 @@ static int write_word(config_streamer_t *c, config_streamer_buffer_align_type_t 
 
     uint32_t flashSectorSize = flashGeometry->sectorSize;
     uint32_t flashPageSize = flashGeometry->pageSize;
+    const uint8_t *buffers[1];
+    uint32_t bufferSizes[1];
 
     bool onPageBoundary = (flashAddress % flashPageSize == 0);
     if (onPageBoundary) {
@@ -390,19 +413,23 @@ static int write_word(config_streamer_t *c, config_streamer_buffer_align_type_t 
             flashEraseSector(flashAddress);
         }
 
-        flashPageProgramBegin(flashAddress);
+        flashPageProgramBegin(flashAddress, NULL);
     }
 
-    flashPageProgramContinue((uint8_t *)buffer, CONFIG_STREAMER_BUFFER_SIZE);
+    buffers[0] = (uint8_t *)buffer;
+    bufferSizes[0] = CONFIG_STREAMER_BUFFER_SIZE;
 
-#elif defined(CONFIG_IN_RAM) || defined(CONFIG_IN_SDCARD)
+    flashPageProgramContinue(buffers, bufferSizes, 1);
+
+#elif defined(CONFIG_IN_RAM) || defined(CONFIG_IN_SDCARD) || defined(CONFIG_IN_MEMORY_MAPPED_FLASH)
     if (c->address == (uintptr_t)&eepromData[0]) {
         memset(eepromData, 0, sizeof(eepromData));
     }
 
     uint64_t *dest_addr = (uint64_t *)c->address;
     uint64_t *src_addr = (uint64_t*)buffer;
-    uint8_t row_index = 4;
+    uint8_t row_index = CONFIG_STREAMER_BUFFER_SIZE / sizeof(uint64_t);
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE % sizeof(uint64_t) == 0, "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
     /* copy the 256 bits flash word */
     do
     {
@@ -417,6 +444,7 @@ static int write_word(config_streamer_t *c, config_streamer_buffer_align_type_t 
             return -1;
         }
     }
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t), "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
     const FLASH_Status status = FLASH_ProgramWord(c->address, *buffer);
     if (status != FLASH_COMPLETE) {
         return -2;
@@ -428,10 +456,12 @@ static int write_word(config_streamer_t *c, config_streamer_buffer_align_type_t 
     if (c->address % FLASH_PAGE_SIZE == 0) {
         FLASH_EraseInitTypeDef EraseInitStruct = {
             .TypeErase     = FLASH_TYPEERASE_SECTORS,
+#if !(defined(STM32H7A3xx) || defined(STM32H7A3xxQ))
             .VoltageRange  = FLASH_VOLTAGE_RANGE_3, // 2.7-3.6V
+#endif
             .NbSectors     = 1
         };
-        getFLASHSectorForEEPROM(&EraseInitStruct.Banks, &EraseInitStruct.Sector);
+        getFLASHSectorForEEPROM(c->address, &EraseInitStruct.Banks, &EraseInitStruct.Sector);
         uint32_t SECTORError;
         const HAL_StatusTypeDef status = HAL_FLASHEx_Erase(&EraseInitStruct, &SECTORError);
         if (status != HAL_OK) {
@@ -441,6 +471,7 @@ static int write_word(config_streamer_t *c, config_streamer_buffer_align_type_t 
 
     // For H7
     // HAL_StatusTypeDef HAL_FLASH_Program(uint32_t TypeProgram, uint32_t Address, uint64_t DataAddress);
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t) * FLASH_NB_32BITWORD_IN_FLASHWORD,  "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
     const HAL_StatusTypeDef status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD, c->address, (uint64_t)(uint32_t)buffer);
     if (status != HAL_OK) {
         return -2;
@@ -460,23 +491,75 @@ static int write_word(config_streamer_t *c, config_streamer_buffer_align_type_t 
         }
     }
 
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t) * 1,  "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
     // For F7
     // HAL_StatusTypeDef HAL_FLASH_Program(uint32_t TypeProgram, uint32_t Address, uint64_t Data);
     const HAL_StatusTypeDef status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, c->address, (uint64_t)*buffer);
     if (status != HAL_OK) {
         return -2;
     }
-#else // !STM32H7 && !STM32F7
+#elif defined(STM32G4)
     if (c->address % FLASH_PAGE_SIZE == 0) {
-#if defined(STM32F4)
+
+        FLASH_EraseInitTypeDef EraseInitStruct = {
+            .TypeErase     = FLASH_TYPEERASE_PAGES,
+            .NbPages       = 1
+        };
+        getFLASHSectorForEEPROM(c->address, &EraseInitStruct.Banks, &EraseInitStruct.Page);
+        uint32_t SECTORError;
+        const HAL_StatusTypeDef status = HAL_FLASHEx_Erase(&EraseInitStruct, &SECTORError);
+        if (status != HAL_OK) {
+            return -1;
+        }
+    }
+
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t) * 2,  "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
+    const HAL_StatusTypeDef status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, c->address, (uint64_t)*buffer);
+    if (status != HAL_OK) {
+        return -2;
+    }
+#elif defined(AT32F4)
+    if (c->address % FLASH_PAGE_SIZE == 0) {
+        const flash_status_type status = flash_sector_erase(c->address);
+        if (status != FLASH_OPERATE_DONE) {
+            return -1;
+        }
+    }
+
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t) * 1,  "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
+    const flash_status_type status = flash_word_program(c->address, (uint32_t)*buffer);
+    if (status != FLASH_OPERATE_DONE) {
+        return -2;
+    }
+#elif defined(APM32F4)
+    if (c->address % FLASH_PAGE_SIZE == 0) {
+        FLASH_EraseInitTypeDef EraseInitStruct = {
+            .TypeErase     = FLASH_TYPEERASE_SECTORS,
+            .VoltageRange  = FLASH_VOLTAGE_RANGE_3, // 2.7-3.6V
+            .NbSectors     = 1
+        };
+        EraseInitStruct.Sector = getFLASHSectorForEEPROM();
+        uint32_t SECTORError;
+        const DAL_StatusTypeDef status = DAL_FLASHEx_Erase(&EraseInitStruct, &SECTORError);
+        if (status != DAL_OK) {
+            return -1;
+        }
+    }
+
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t) * 1,  "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
+    const DAL_StatusTypeDef status = DAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, c->address, (uint64_t)*buffer);
+    if (status != DAL_OK) {
+        return -2;
+    }
+#else // !STM32H7 && !STM32F7 && !STM32G4
+    if (c->address % FLASH_PAGE_SIZE == 0) {
         const FLASH_Status status = FLASH_EraseSector(getFLASHSectorForEEPROM(), VoltageRange_3); //0x08080000 to 0x080A0000
-#else // STM32F3, STM32F1
-        const FLASH_Status status = FLASH_ErasePage(c->address);
-#endif
         if (status != FLASH_COMPLETE) {
             return -1;
         }
     }
+
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t) * 1,  "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
     const FLASH_Status status = FLASH_ProgramWord(c->address, *buffer);
     if (status != FLASH_COMPLETE) {
         return -2;
@@ -512,25 +595,29 @@ int config_streamer_flush(config_streamer_t *c)
         c->err = write_word(c, &c->buffer.w);
         c->at = 0;
     }
-    return c-> err;
+    return c->err;
 }
 
 int config_streamer_finish(config_streamer_t *c)
 {
     if (c->unlocked) {
 #if defined(CONFIG_IN_SDCARD)
-        bool saveEEPROMToSDCard(void); // XXX forward declaration to avoid circular dependency between config_streamer / config_eeprom
         saveEEPROMToSDCard();
-        // TODO overwrite the data in the file on the SD card.
 #elif defined(CONFIG_IN_EXTERNAL_FLASH)
         flashFlush();
+#elif defined(CONFIG_IN_MEMORY_MAPPED_FLASH)
+        saveEEPROMToMemoryMappedFlash();
 #elif defined(CONFIG_IN_RAM)
         // NOP
 #elif defined(CONFIG_IN_FILE)
         FLASH_Lock();
 #elif defined(CONFIG_IN_FLASH)
-#if defined(STM32F7) || defined(STM32H7)
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4)
         HAL_FLASH_Lock();
+#elif defined(AT32F4)
+        flash_lock();
+#elif defined(APM32F4)
+        DAL_FLASH_Lock();
 #else
         FLASH_Lock();
 #endif

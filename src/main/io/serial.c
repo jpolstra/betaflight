@@ -28,13 +28,14 @@
 
 #include "cli/cli.h"
 
+#include "common/maths.h"
 #include "common/utils.h"
 
 #include "drivers/time.h"
 #include "drivers/system.h"
 #include "drivers/serial.h"
 #include "drivers/serial_uart.h"
-#if defined(USE_SOFTSERIAL1) || defined(USE_SOFTSERIAL2)
+#if defined(USE_SOFTSERIAL)
 #include "drivers/serial_softserial.h"
 #endif
 
@@ -48,7 +49,7 @@
 #include "drivers/serial_usb_vcp.h"
 #endif
 
-#include "fc/config.h"
+#include "config/config.h"
 
 #include "io/serial.h"
 
@@ -93,11 +94,18 @@ const serialPortIdentifier_e serialPortIdentifiers[SERIAL_PORT_COUNT] = {
 #ifdef USE_UART8
     SERIAL_PORT_USART8,
 #endif
-#ifdef USE_SOFTSERIAL1
-    SERIAL_PORT_SOFTSERIAL1,
+#ifdef USE_UART9
+    SERIAL_PORT_UART9,
 #endif
-#ifdef USE_SOFTSERIAL2
+#ifdef USE_UART10
+    SERIAL_PORT_USART10,
+#endif
+#ifdef USE_SOFTSERIAL
+    SERIAL_PORT_SOFTSERIAL1,
     SERIAL_PORT_SOFTSERIAL2,
+#endif
+#ifdef USE_LPUART1
+    SERIAL_PORT_LPUART1,
 #endif
 };
 
@@ -106,9 +114,20 @@ static uint8_t serialPortCount;
 const uint32_t baudRates[] = {0, 9600, 19200, 38400, 57600, 115200, 230400, 250000,
         400000, 460800, 500000, 921600, 1000000, 1500000, 2000000, 2470000}; // see baudRate_e
 
-#define BAUD_RATE_COUNT (sizeof(baudRates) / sizeof(baudRates[0]))
+#define BAUD_RATE_COUNT ARRAYLEN(baudRates) 
 
-PG_REGISTER_WITH_RESET_FN(serialConfig_t, serialConfig, PG_SERIAL_CONFIG, 0);
+serialPortConfig_t *serialFindPortConfigurationMutable(serialPortIdentifier_e identifier)
+{
+    for (int index = 0; index < SERIAL_PORT_COUNT; index++) {
+        serialPortConfig_t *candidate = &serialConfigMutable()->portConfigs[index];
+        if (candidate->identifier == identifier) {
+            return candidate;
+        }
+    }
+    return NULL;
+}
+
+PG_REGISTER_WITH_RESET_FN(serialConfig_t, serialConfig, PG_SERIAL_CONFIG, 1);
 
 void pgResetFn_serialConfig(serialConfig_t *serialConfig)
 {
@@ -124,26 +143,75 @@ void pgResetFn_serialConfig(serialConfig_t *serialConfig)
 
     serialConfig->portConfigs[0].functionMask = FUNCTION_MSP;
 
+#ifdef MSP_UART
+    serialPortConfig_t *uart2Config = serialFindPortConfigurationMutable(MSP_UART);
+    if (uart2Config) {
+        uart2Config->functionMask = FUNCTION_MSP;
+    }
+#endif
+
+#if defined(USE_GPS) && defined(GPS_UART)
+    serialPortConfig_t *gpsUartConfig = serialFindPortConfigurationMutable(GPS_UART);
+    if (gpsUartConfig) {
+        gpsUartConfig->functionMask = FUNCTION_GPS;
+    }
+#endif
+
 #ifdef SERIALRX_UART
-    serialPortConfig_t *serialRxUartConfig = serialFindPortConfiguration(SERIALRX_UART);
+    serialPortConfig_t *serialRxUartConfig = serialFindPortConfigurationMutable(SERIALRX_UART);
     if (serialRxUartConfig) {
         serialRxUartConfig->functionMask = FUNCTION_RX_SERIAL;
     }
 #endif
 
 #ifdef SBUS_TELEMETRY_UART
-    serialPortConfig_t *serialTlemetryUartConfig = serialFindPortConfiguration(SBUS_TELEMETRY_UART);
-    if (serialTlemetryUartConfig) {
-        serialTlemetryUartConfig->functionMask = FUNCTION_TELEMETRY_SMARTPORT;
+    serialPortConfig_t *serialTelemetryUartConfig = serialFindPortConfigurationMutable(SBUS_TELEMETRY_UART);
+    if (serialTelemetryUartConfig) {
+        serialTelemetryUartConfig->functionMask = FUNCTION_TELEMETRY_SMARTPORT;
     }
 #endif
 
-#if defined(USE_VCP) && defined(USE_MSP_UART)
-    if (serialConfig->portConfigs[0].identifier == SERIAL_PORT_USB_VCP) {
-        serialPortConfig_t * uart1Config = serialFindPortConfiguration(SERIAL_PORT_USART1);
-        if (uart1Config) {
-            uart1Config->functionMask = FUNCTION_MSP;
-        }
+#ifdef ESC_SENSOR_UART
+    serialPortConfig_t *escSensorUartConfig = serialFindPortConfigurationMutable(ESC_SENSOR_UART);
+    if (escSensorUartConfig) {
+        escSensorUartConfig->functionMask = FUNCTION_ESC_SENSOR;
+    }
+#endif
+
+#ifdef USE_VTX
+#ifdef VTX_SMARTAUDIO_UART
+    serialPortConfig_t *vtxSmartAudioUartConfig = serialFindPortConfigurationMutable(VTX_SMARTAUDIO_UART);
+    if (vtxSmartAudioUartConfig) {
+        vtxSmartAudioUartConfig->functionMask = FUNCTION_VTX_SMARTAUDIO;
+    }
+#endif
+
+#ifdef VTX_TRAMP_UART
+    serialPortConfig_t *vtxTrampUartConfig = serialFindPortConfigurationMutable(VTX_TRAMP_UART);
+    if (vtxTrampUartConfig) {
+        vtxTrampUartConfig->functionMask = FUNCTION_VTX_TRAMP;
+    }
+#endif
+
+#ifdef VTX_MSP_UART
+    serialPortConfig_t *vtxMspUartConfig = serialFindPortConfigurationMutable(VTX_MSP_UART);
+    if (vtxMspUartConfig) {
+        vtxMspUartConfig->functionMask = FUNCTION_VTX_MSP;
+    }
+#endif
+#endif // USE_VTX
+
+#ifdef MSP_DISPLAYPORT_UART
+    serialPortConfig_t *displayPortUartConfig = serialFindPortConfigurationMutable(MSP_DISPLAYPORT_UART);
+    if (displayPortUartConfig) {
+        displayPortUartConfig->functionMask = FUNCTION_VTX_MSP | FUNCTION_MSP;
+    }
+#endif
+
+#if defined(USE_MSP_UART)
+    serialPortConfig_t * uart1Config = serialFindPortConfigurationMutable(USE_MSP_UART);
+    if (uart1Config) {
+        uart1Config->functionMask = FUNCTION_MSP;
     }
 #endif
 
@@ -185,7 +253,8 @@ serialPortUsage_t *findSerialPortUsageByIdentifier(serialPortIdentifier_e identi
     return NULL;
 }
 
-serialPortUsage_t *findSerialPortUsageByPort(serialPort_t *serialPort) {
+serialPortUsage_t *findSerialPortUsageByPort(const serialPort_t *serialPort)
+{
     uint8_t index;
     for (index = 0; index < SERIAL_PORT_COUNT; index++) {
         serialPortUsage_t *candidate = &serialPortUsageList[index];
@@ -202,17 +271,17 @@ typedef struct findSerialPortConfigState_s {
 
 static findSerialPortConfigState_t findSerialPortConfigState;
 
-serialPortConfig_t *findSerialPortConfig(serialPortFunction_e function)
+const serialPortConfig_t *findSerialPortConfig(serialPortFunction_e function)
 {
     memset(&findSerialPortConfigState, 0, sizeof(findSerialPortConfigState));
 
     return findNextSerialPortConfig(function);
 }
 
-serialPortConfig_t *findNextSerialPortConfig(serialPortFunction_e function)
+const serialPortConfig_t *findNextSerialPortConfig(serialPortFunction_e function)
 {
     while (findSerialPortConfigState.lastIndex < SERIAL_PORT_COUNT) {
-        serialPortConfig_t *candidate = &serialConfigMutable()->portConfigs[findSerialPortConfigState.lastIndex++];
+        const serialPortConfig_t *candidate = &serialConfig()->portConfigs[findSerialPortConfigState.lastIndex++];
 
         if (candidate->functionMask & function) {
             return candidate;
@@ -251,14 +320,13 @@ serialPort_t *findSharedSerialPort(uint16_t functionMask, serialPortFunction_e s
 }
 
 #ifdef USE_TELEMETRY
-#define ALL_FUNCTIONS_SHARABLE_WITH_MSP (FUNCTION_BLACKBOX | TELEMETRY_PORT_FUNCTIONS_MASK)
+#define ALL_FUNCTIONS_SHARABLE_WITH_MSP (FUNCTION_BLACKBOX | TELEMETRY_PORT_FUNCTIONS_MASK | FUNCTION_VTX_MSP)
 #else
-#define ALL_FUNCTIONS_SHARABLE_WITH_MSP (FUNCTION_BLACKBOX)
+#define ALL_FUNCTIONS_SHARABLE_WITH_MSP (FUNCTION_BLACKBOX | FUNCTION_VTX_MSP)
 #endif
 
-bool isSerialConfigValid(const serialConfig_t *serialConfigToCheck)
+bool isSerialConfigValid(serialConfig_t *serialConfigToCheck)
 {
-    UNUSED(serialConfigToCheck);
     /*
      * rules:
      * - 1 MSP port minimum, max MSP ports is defined and must be adhered to.
@@ -273,6 +341,20 @@ bool isSerialConfigValid(const serialConfig_t *serialConfigToCheck)
     for (int index = 0; index < SERIAL_PORT_COUNT; index++) {
         const serialPortConfig_t *portConfig = &serialConfigToCheck->portConfigs[index];
 
+#ifdef USE_SOFTSERIAL
+        if ((portConfig->identifier == SERIAL_PORT_SOFTSERIAL1) ||
+            (portConfig->identifier == SERIAL_PORT_SOFTSERIAL2)) {
+            // Ensure MSP or serial RX is not enabled on soft serial ports
+            serialConfigToCheck->portConfigs[index].functionMask &= ~(FUNCTION_MSP | FUNCTION_RX_SERIAL);
+            // Ensure that the baud rate on soft serial ports is limited to 19200
+#ifndef USE_OVERRIDE_SOFTSERIAL_BAUDRATE
+            serialConfigToCheck->portConfigs[index].gps_baudrateIndex = constrain(portConfig->gps_baudrateIndex, BAUD_AUTO, BAUD_19200);
+            serialConfigToCheck->portConfigs[index].blackbox_baudrateIndex = constrain(portConfig->blackbox_baudrateIndex, BAUD_AUTO, BAUD_19200);
+            serialConfigToCheck->portConfigs[index].telemetry_baudrateIndex = constrain(portConfig->telemetry_baudrateIndex, BAUD_AUTO, BAUD_19200);
+#endif
+        }
+#endif // USE_SOFTSERIAL
+
         if (portConfig->functionMask & FUNCTION_MSP) {
             mspPortCount++;
         } else if (portConfig->identifier == SERIAL_PORT_USB_VCP) {
@@ -281,16 +363,23 @@ bool isSerialConfigValid(const serialConfig_t *serialConfigToCheck)
         }
 
         uint8_t bitCount = BITCOUNT(portConfig->functionMask);
+
+#ifdef USE_VTX_MSP
+        if ((portConfig->functionMask & FUNCTION_VTX_MSP) && bitCount == 1) { // VTX MSP has to be shared with RX or MSP serial
+            return false;
+        }
+#endif
+
         if (bitCount > 1) {
             // shared
-            if (bitCount > 2) {
+            if (bitCount > (BITCOUNT(FUNCTION_MSP | ALL_FUNCTIONS_SHARABLE_WITH_MSP))) {
                 return false;
             }
 
             if ((portConfig->functionMask & FUNCTION_MSP) && (portConfig->functionMask & ALL_FUNCTIONS_SHARABLE_WITH_MSP)) {
                 // MSP & telemetry
 #ifdef USE_TELEMETRY
-            } else if (telemetryCheckRxPortShared(portConfig)) {
+            } else if (telemetryCheckRxPortShared(portConfig, rxConfig()->serialrx_provider)) {
                 // serial RX & telemetry
 #endif
             } else {
@@ -306,10 +395,10 @@ bool isSerialConfigValid(const serialConfig_t *serialConfigToCheck)
     return true;
 }
 
-serialPortConfig_t *serialFindPortConfiguration(serialPortIdentifier_e identifier)
+const serialPortConfig_t *serialFindPortConfiguration(serialPortIdentifier_e identifier)
 {
     for (int index = 0; index < SERIAL_PORT_COUNT; index++) {
-        serialPortConfig_t *candidate = &serialConfigMutable()->portConfigs[index];
+        const serialPortConfig_t *candidate = &serialConfig()->portConfigs[index];
         if (candidate->identifier == identifier) {
             return candidate;
         }
@@ -319,7 +408,7 @@ serialPortConfig_t *serialFindPortConfiguration(serialPortIdentifier_e identifie
 
 bool doesConfigurationUsePort(serialPortIdentifier_e identifier)
 {
-    serialPortConfig_t *candidate = serialFindPortConfiguration(identifier);
+    const serialPortConfig_t *candidate = serialFindPortConfiguration(identifier);
     return candidate != NULL && candidate->functionMask;
 }
 
@@ -332,7 +421,7 @@ serialPort_t *openSerialPort(
     portMode_e mode,
     portOptions_e options)
 {
-#if !(defined(USE_UART) || defined(USE_SOFTSERIAL1) || defined(USE_SOFTSERIAL2))
+#if !(defined(USE_UART) || defined(USE_SOFTSERIAL))
     UNUSED(rxCallback);
     UNUSED(rxCallbackData);
     UNUSED(baudRate);
@@ -347,6 +436,13 @@ serialPort_t *openSerialPort(
     }
 
     serialPort_t *serialPort = NULL;
+
+#if defined(USE_SOFTSERIAL) && !defined(USE_OVERRIDE_SOFTSERIAL_BAUDRATE)
+    if (((identifier == SERIAL_PORT_SOFTSERIAL1) || (identifier == SERIAL_PORT_SOFTSERIAL2)) && (baudRate > 19200)) {
+        // Don't continue if baud rate requested is higher then the limit set on soft serial ports
+        return NULL;
+    }
+#endif
 
     switch (identifier) {
 #ifdef USE_VCP
@@ -380,6 +476,15 @@ serialPort_t *openSerialPort(
 #ifdef USE_UART8
         case SERIAL_PORT_USART8:
 #endif
+#ifdef USE_UART9
+        case SERIAL_PORT_UART9:
+#endif
+#ifdef USE_UART10
+        case SERIAL_PORT_USART10:
+#endif
+#ifdef USE_LPUART1
+        case SERIAL_PORT_LPUART1:
+#endif
 #if defined(SIMULATOR_BUILD)
             // emulate serial ports over TCP
             serialPort = serTcpOpen(SERIAL_PORT_IDENTIFIER_TO_UARTDEV(identifier), rxCallback, rxCallbackData, baudRate, mode, options);
@@ -389,12 +494,10 @@ serialPort_t *openSerialPort(
             break;
 #endif
 
-#ifdef USE_SOFTSERIAL1
+#ifdef USE_SOFTSERIAL
         case SERIAL_PORT_SOFTSERIAL1:
             serialPort = openSoftSerial(SOFTSERIAL1, rxCallback, rxCallbackData, baudRate, mode, options);
             break;
-#endif
-#ifdef USE_SOFTSERIAL2
         case SERIAL_PORT_SOFTSERIAL2:
             serialPort = openSoftSerial(SOFTSERIAL2, rxCallback, rxCallbackData, baudRate, mode, options);
             break;
@@ -432,7 +535,7 @@ void closeSerialPort(serialPort_t *serialPort)
 
 void serialInit(bool softserialEnabled, serialPortIdentifier_e serialPortToDisable)
 {
-#if !defined(USE_SOFTSERIAL1) && !defined(USE_SOFTSERIAL2)
+#if !defined(USE_SOFTSERIAL)
     UNUSED(softserialEnabled);
 #endif
 
@@ -448,9 +551,12 @@ void serialInit(bool softserialEnabled, serialPortIdentifier_e serialPortToDisab
                 serialPortCount--;
             }
         }
-
 #if !defined(SIMULATOR_BUILD)
-        else if (serialPortUsageList[index].identifier <= SERIAL_PORT_USART8) {
+        else if (serialPortUsageList[index].identifier <= SERIAL_PORT_USART10
+#ifdef USE_LPUART1
+            || serialPortUsageList[index].identifier == SERIAL_PORT_LPUART1
+#endif
+        ) {
             int resourceIndex = SERIAL_PORT_IDENTIFIER_TO_INDEX(serialPortUsageList[index].identifier);
             if (!(serialPinConfig()->ioTagTx[resourceIndex] || serialPinConfig()->ioTagRx[resourceIndex])) {
                 serialPortUsageList[index].identifier = SERIAL_PORT_NONE;
@@ -458,18 +564,18 @@ void serialInit(bool softserialEnabled, serialPortIdentifier_e serialPortToDisab
             }
         }
 #endif
-
-        else if ((serialPortUsageList[index].identifier == SERIAL_PORT_SOFTSERIAL1
-#ifdef USE_SOFTSERIAL1
-            && !(softserialEnabled && (serialPinConfig()->ioTagTx[RESOURCE_SOFT_OFFSET + SOFTSERIAL1] ||
-                serialPinConfig()->ioTagRx[RESOURCE_SOFT_OFFSET + SOFTSERIAL1]))
+#ifdef USE_SOFTSERIAL
+        else if (((serialPortUsageList[index].identifier == SERIAL_PORT_SOFTSERIAL1) &&
+                   (!softserialEnabled || !(softSerialPinConfig()->ioTagRx[SOFTSERIAL1] || softSerialPinConfig()->ioTagTx[SOFTSERIAL1]))) ||
+                  ((serialPortUsageList[index].identifier == SERIAL_PORT_SOFTSERIAL2) &&
+                   (!softserialEnabled || !(softSerialPinConfig()->ioTagRx[SOFTSERIAL2] || softSerialPinConfig()->ioTagTx[SOFTSERIAL2]))))
+#else
+        else if (
+            (serialPortUsageList[index].identifier == SERIAL_PORT_SOFTSERIAL1) ||
+            (serialPortUsageList[index].identifier == SERIAL_PORT_SOFTSERIAL2)
+        )
 #endif
-           ) || (serialPortUsageList[index].identifier == SERIAL_PORT_SOFTSERIAL2
-#ifdef USE_SOFTSERIAL2
-            && !(softserialEnabled && (serialPinConfig()->ioTagTx[RESOURCE_SOFT_OFFSET + SOFTSERIAL2] ||
-                serialPinConfig()->ioTagRx[RESOURCE_SOFT_OFFSET + SOFTSERIAL2]))
-#endif
-            )) {
+        {
             serialPortUsageList[index].identifier = SERIAL_PORT_NONE;
             serialPortCount--;
         }

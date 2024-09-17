@@ -36,7 +36,7 @@
 
 #include "config/feature.h"
 
-#include "fc/config.h"
+#include "config/config.h"
 
 #include "io/ledstrip.h"
 
@@ -65,8 +65,10 @@ const char * const ledProfileNames[LED_PROFILE_COUNT] = {
 #endif
 };
 
-static long cmsx_Ledstrip_OnEnter(void)
+static const void *cmsx_Ledstrip_OnEnter(displayPort_t *pDisp)
 {
+    UNUSED(pDisp);
+
     cmsx_FeatureLedstrip = featureIsEnabled(FEATURE_LED_STRIP) ? 1 : 0;
     cmsx_ledProfile = getLedProfile();
     cmsx_ledRaceColor = ledStripConfig()->ledstrip_race_color;
@@ -77,19 +79,20 @@ static long cmsx_Ledstrip_OnEnter(void)
     cmsx_ledVisualBeeper = ledStripConfig()->ledstrip_visual_beeper;
     cmsx_ledVisualBeeperColor = ledStripConfig()->ledstrip_visual_beeper_color;
 
-    return 0;
+    return NULL;
 }
 
-static long cmsx_Ledstrip_OnExit(const OSD_Entry *self)
+static const void *cmsx_Ledstrip_OnExit(displayPort_t *pDisp, const OSD_Entry *self)
 {
+    UNUSED(pDisp);
     UNUSED(self);
 
     if (cmsx_FeatureLedstrip) {
-        featureEnable(FEATURE_LED_STRIP);
+        featureEnableImmediate(FEATURE_LED_STRIP);
         ledStripEnable();
     } else {
         ledStripDisable();
-        featureDisable(FEATURE_LED_STRIP);
+        featureDisableImmediate(FEATURE_LED_STRIP);
     }
 
     setLedProfile(cmsx_ledProfile);
@@ -101,23 +104,23 @@ static long cmsx_Ledstrip_OnExit(const OSD_Entry *self)
     ledStripConfigMutable()->ledstrip_visual_beeper = cmsx_ledVisualBeeper;
     ledStripConfigMutable()->ledstrip_visual_beeper_color = cmsx_ledVisualBeeperColor;
 
-    return 0;
+    return NULL;
 }
 
 static const OSD_Entry cmsx_menuLedstripEntries[] =
 {
-    { "-- LED STRIP --",  OME_Label, NULL, NULL, 0 },
-    { "ENABLED",          OME_Bool,  NULL, &cmsx_FeatureLedstrip, 0 },
-    { "PROFILE",          OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledProfile, LED_PROFILE_COUNT - 1, ledProfileNames }, 0 },
-    { "RACE COLOR",       OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledRaceColor, COLOR_COUNT - 1, lookupTableLedstripColors }, 0 },
-    { "BEACON COLOR",     OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledBeaconColor, COLOR_COUNT -1, lookupTableLedstripColors }, 0 },
-    { "BEACON PERIOD",    OME_UINT16,NULL, &(OSD_UINT16_t){ &cmsx_ledBeaconPeriod, 50, 10000, 10 }, 0 },
-    { "BEACON ON %",      OME_UINT8, NULL, &(OSD_UINT8_t){ &cmsx_ledBeaconOnPercent, 0, 100, 1 }, 0 },
-    { "BEACON ARMED ONLY",OME_Bool,  NULL, &cmsx_ledBeaconArmedOnly, 0 },
-    { "VISUAL BEEPER",    OME_Bool,  NULL, &cmsx_ledVisualBeeper, 0 },
-    { "VISUAL COLOR",     OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledVisualBeeperColor, COLOR_COUNT - 1, lookupTableLedstripColors }, 0 },
-    { "BACK", OME_Back, NULL, NULL, 0 },
-    { NULL, OME_END, NULL, NULL, 0 }
+    { "-- LED STRIP --",  OME_Label, NULL, NULL },
+    { "ENABLED",          OME_Bool,  NULL, &cmsx_FeatureLedstrip },
+    { "PROFILE",          OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledProfile, LED_PROFILE_COUNT - 1, ledProfileNames } },
+    { "RACE COLOR",       OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledRaceColor, COLOR_COUNT - 1, lookupTableLedstripColors } },
+    { "BEACON COLOR",     OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledBeaconColor, COLOR_COUNT -1, lookupTableLedstripColors } },
+    { "BEACON PERIOD",    OME_UINT16,NULL, &(OSD_UINT16_t){ &cmsx_ledBeaconPeriod, 50, 10000, 10 } },
+    { "BEACON ON %",      OME_UINT8, NULL, &(OSD_UINT8_t){ &cmsx_ledBeaconOnPercent, 0, 100, 1 } },
+    { "BEACON ARMED ONLY",OME_Bool,  NULL, &cmsx_ledBeaconArmedOnly },
+    { "VISUAL BEEPER",    OME_Bool,  NULL, &cmsx_ledVisualBeeper },
+    { "VISUAL COLOR",     OME_TAB,   NULL, &(OSD_TAB_t){ &cmsx_ledVisualBeeperColor, COLOR_COUNT - 1, lookupTableLedstripColors } },
+    { "BACK", OME_Back, NULL, NULL },
+    { NULL, OME_END, NULL, NULL}
 };
 
 CMS_Menu cmsx_menuLedstrip = {
@@ -127,6 +130,7 @@ CMS_Menu cmsx_menuLedstrip = {
 #endif
     .onEnter = cmsx_Ledstrip_OnEnter,
     .onExit = cmsx_Ledstrip_OnExit,
+    .onDisplayUpdate = NULL,
     .entries = cmsx_menuLedstripEntries
 };
 #endif // LED_STRIP

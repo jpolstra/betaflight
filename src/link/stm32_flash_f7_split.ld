@@ -32,7 +32,7 @@ SECTIONS
     PROVIDE (isr_vector_table_base = .);
     KEEP(*(.isr_vector)) /* Startup code */
     . = ALIGN(4);
-  } >FLASH AT >AXIM_FLASH
+  } >FLASH AT >WRITABLE_FLASH
 
   /* The program code and other data goes into FLASH */
   .text :
@@ -51,31 +51,31 @@ SECTIONS
 
     . = ALIGN(4);
     _etext = .;        /* define a global symbols at end of code */
-  } >FLASH1 AT >AXIM_FLASH1
+  } >FLASH1 AT >WRITABLE_FLASH1
 
   /* Critical program code goes into ITCM RAM */
-  /* Copy specific fast-executing code to ITCM RAM */ 
-  tcm_code = LOADADDR(.tcm_code); 
+  /* Copy specific fast-executing code to ITCM RAM */
+  tcm_code = LOADADDR(.tcm_code);
   .tcm_code :
   {
     . = ALIGN(4);
-    tcm_code_start = .; 
+    tcm_code_start = .;
     *(.tcm_code)
     *(.tcm_code*)
     . = ALIGN(4);
-    tcm_code_end = .; 
-  } >ITCM_RAM AT >AXIM_FLASH1
+    tcm_code_end = .;
+  } >ITCM_RAM AT >WRITABLE_FLASH1
 
-  .ARM.extab   : 
-  { 
-    *(.ARM.extab* .gnu.linkonce.armextab.*) 
-  } >FLASH
-  
-  .ARM : 
+  .ARM.extab   :
+  {
+    *(.ARM.extab* .gnu.linkonce.armextab.*)
+  } >MOVABLE_FLASH
+
+  .ARM :
   {
     __exidx_start = .;
     *(.ARM.exidx*) __exidx_end = .;
-  } >FLASH AT >AXIM_FLASH
+  } >MOVABLE_FLASH
 
   .pg_registry :
   {
@@ -83,29 +83,14 @@ SECTIONS
     KEEP (*(.pg_registry))
     KEEP (*(SORT(.pg_registry.*)))
     PROVIDE_HIDDEN (__pg_registry_end = .);
-  } >FLASH AT >AXIM_FLASH
-  
+  } >MOVABLE_FLASH
+
   .pg_resetdata :
   {
     PROVIDE_HIDDEN (__pg_resetdata_start = .);
     KEEP (*(.pg_resetdata))
     PROVIDE_HIDDEN (__pg_resetdata_end = .);
-  } >FLASH AT >AXIM_FLASH
-
-  /* Storage for the address for the configuration section so we can grab it out of the hex file */
-  .custom_defaults :
-  {
-    . = ALIGN(4);
-    KEEP (*(.custom_defaults_start_address))
-    . = ALIGN(4);
-    KEEP (*(.custom_defaults_end_address))
-    . = ALIGN(4);
-    __custom_defaults_internal_start = .;
-    *(.custom_defaults);
-  } >FLASH_CUSTOM_DEFAULTS
-
-  PROVIDE_HIDDEN (__custom_defaults_start = DEFINED(USE_CUSTOM_DEFAULTS_EXTENDED) ? ORIGIN(FLASH_CUSTOM_DEFAULTS_EXTENDED) : __custom_defaults_internal_start);
-  PROVIDE_HIDDEN (__custom_defaults_end = DEFINED(USE_CUSTOM_DEFAULTS_EXTENDED) ? ORIGIN(FLASH_CUSTOM_DEFAULTS_EXTENDED) + LENGTH(FLASH_CUSTOM_DEFAULTS_EXTENDED) : ORIGIN(FLASH_CUSTOM_DEFAULTS) + LENGTH(FLASH_CUSTOM_DEFAULTS));
+  } >WRITABLE_FLASH1
 
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
@@ -120,7 +105,7 @@ SECTIONS
 
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */
-  } >RAM AT >AXIM_FLASH
+  } >RAM AT >WRITABLE_FLASH1
 
   /* Uninitialized data section */
   . = ALIGN(4);
@@ -156,7 +141,7 @@ SECTIONS
   /* used during startup to initialized fastram_data */
   _sfastram_idata = LOADADDR(.fastram_data);
 
-  /* Initialized FAST_RAM section for unsuspecting developers */
+  /* Initialized FAST_DATA section for unsuspecting developers */
   .fastram_data :
   {
     . = ALIGN(4);
@@ -166,7 +151,7 @@ SECTIONS
 
     . = ALIGN(4);
     _efastram_data = .;        /* define a global symbol at data end */
-  } >FASTRAM AT >AXIM_FLASH
+  } >FASTRAM AT >WRITABLE_FLASH1
 
   . = ALIGN(4);
   .fastram_bss (NOLOAD) :

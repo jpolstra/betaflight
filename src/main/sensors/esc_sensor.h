@@ -33,7 +33,7 @@ PG_DECLARE(escSensorConfig_t, escSensorConfig);
 typedef struct {
     uint8_t dataAge;
     int8_t temperature;  // C degrees
-    int16_t voltage;     // 0.01V
+    uint16_t voltage;     // 0.01V 
     int32_t current;     // 0.01A
     int32_t consumption; // mAh
     int16_t rpm;         // 0.01erpm
@@ -54,5 +54,3 @@ void startEscDataRead(uint8_t *frameBuffer, uint8_t frameLength);
 uint8_t getNumberEscBytesRead(void);
 
 uint8_t calculateCrc8(const uint8_t *Buf, const uint8_t BufLen);
-
-int calcEscRpm(int erpm);

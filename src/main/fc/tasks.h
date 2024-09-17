@@ -20,6 +20,11 @@
 
 #pragma once
 
-#define LOOPTIME_SUSPEND_TIME 3  // Prevent too long busy wait times
+#include "scheduler/scheduler.h"
 
-void fcTasksInit(void);
+void tasksInitData(void);
+void tasksInit(void);
+task_t *getTask(unsigned taskId);
+
+bool taskUpdateRxMainInProgress();
+

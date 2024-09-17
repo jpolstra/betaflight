@@ -39,16 +39,16 @@
 
 #include "drivers/time.h"
 
-#include "fc/config.h"
+#include "config/config.h"
 #include "fc/controlrate_profile.h"
 #include "fc/rc_controls.h"
 #include "fc/rc.h"
 
 #include "flight/pid.h"
+#include "flight/pid_init.h"
 
 #include "io/beeper.h"
 #include "io/ledstrip.h"
-#include "io/motors.h"
 #include "io/pidaudio.h"
 
 #include "osd/osd.h"
@@ -60,6 +60,8 @@
 #include "rx/rx.h"
 
 #include "rc_adjustments.h"
+
+#include "scheduler/scheduler.h"
 
 #define ADJUSTMENT_RANGE_COUNT_INVALID -1
 
@@ -362,8 +364,8 @@ static int applyStepAdjustment(controlRateConfig_t *controlRateConfig, uint8_t a
         break;
     case ADJUSTMENT_PITCH_ROLL_D:
     case ADJUSTMENT_PITCH_D:
-        newValue = constrain((int)currentPidProfile->pid[PID_PITCH].D + delta, 0, 200); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->pid[PID_PITCH].D = newValue;
+        newValue = constrain((int)currentPidProfile->d_min[FD_PITCH] + delta, 0, 200); // FIXME magic numbers repeated in cli.c
+        currentPidProfile->d_min[FD_PITCH] = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_PITCH_D, newValue);
         if (adjustmentFunction == ADJUSTMENT_PITCH_D) {
             break;
@@ -371,8 +373,8 @@ static int applyStepAdjustment(controlRateConfig_t *controlRateConfig, uint8_t a
         // fall through for combined ADJUSTMENT_PITCH_ROLL_D
         FALLTHROUGH;
     case ADJUSTMENT_ROLL_D:
-        newValue = constrain((int)currentPidProfile->pid[PID_ROLL].D + delta, 0, 200); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->pid[PID_ROLL].D = newValue;
+        newValue = constrain((int)currentPidProfile->d_min[FD_ROLL] + delta, 0, 200); // FIXME magic numbers repeated in cli.c
+        currentPidProfile->d_min[FD_ROLL] = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_ROLL_D, newValue);
         break;
     case ADJUSTMENT_YAW_P:
@@ -386,8 +388,8 @@ static int applyStepAdjustment(controlRateConfig_t *controlRateConfig, uint8_t a
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_YAW_I, newValue);
         break;
     case ADJUSTMENT_YAW_D:
-        newValue = constrain((int)currentPidProfile->pid[PID_YAW].D + delta, 0, 200); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->pid[PID_YAW].D = newValue;
+        newValue = constrain((int)currentPidProfile->d_min[FD_YAW] + delta, 0, 200); // FIXME magic numbers repeated in cli.c
+        currentPidProfile->d_min[FD_YAW] = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_YAW_D, newValue);
         break;
     case ADJUSTMENT_RC_RATE_YAW:
@@ -416,11 +418,13 @@ static int applyStepAdjustment(controlRateConfig_t *controlRateConfig, uint8_t a
         currentPidProfile->pid[PID_YAW].F = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_YAW_F, newValue);
         break;
+#if defined(USE_FEEDFORWARD)
     case ADJUSTMENT_FEEDFORWARD_TRANSITION:
-        newValue = constrain(currentPidProfile->feedForwardTransition + delta, 1, 100); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->feedForwardTransition = newValue;
+        newValue = constrain(currentPidProfile->feedforward_transition + delta, 1, 100); // FIXME magic numbers repeated in cli.c
+        currentPidProfile->feedforward_transition = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_FEEDFORWARD_TRANSITION, newValue);
         break;
+#endif
     default:
         newValue = -1;
         break;
@@ -524,7 +528,7 @@ static int applyAbsoluteAdjustment(controlRateConfig_t *controlRateConfig, adjus
     case ADJUSTMENT_PITCH_ROLL_D:
     case ADJUSTMENT_PITCH_D:
         newValue = constrain(value, 0, 200); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->pid[PID_PITCH].D = newValue;
+        currentPidProfile->d_min[FD_PITCH] = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_PITCH_D, newValue);
         if (adjustmentFunction == ADJUSTMENT_PITCH_D) {
             break;
@@ -533,7 +537,7 @@ static int applyAbsoluteAdjustment(controlRateConfig_t *controlRateConfig, adjus
         FALLTHROUGH;
     case ADJUSTMENT_ROLL_D:
         newValue = constrain(value, 0, 200); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->pid[PID_ROLL].D = newValue;
+        currentPidProfile->d_min[FD_ROLL] = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_ROLL_D, newValue);
         break;
     case ADJUSTMENT_YAW_P:
@@ -548,7 +552,7 @@ static int applyAbsoluteAdjustment(controlRateConfig_t *controlRateConfig, adjus
         break;
     case ADJUSTMENT_YAW_D:
         newValue = constrain(value, 0, 200); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->pid[PID_YAW].D = newValue;
+        currentPidProfile->d_min[FD_YAW] = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_YAW_D, newValue);
         break;
     case ADJUSTMENT_RC_RATE_YAW:
@@ -577,11 +581,13 @@ static int applyAbsoluteAdjustment(controlRateConfig_t *controlRateConfig, adjus
         currentPidProfile->pid[PID_YAW].F = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_YAW_F, newValue);
         break;
+#if defined(USE_FEEDFORWARD)
     case ADJUSTMENT_FEEDFORWARD_TRANSITION:
         newValue = constrain(value, 1, 100); // FIXME magic numbers repeated in cli.c
-        currentPidProfile->feedForwardTransition = newValue;
+        currentPidProfile->feedforward_transition = newValue;
         blackboxLogInflightAdjustmentEvent(ADJUSTMENT_FEEDFORWARD_TRANSITION, newValue);
         break;
+#endif
     default:
         newValue = -1;
         break;
@@ -653,6 +659,9 @@ static uint8_t applySelectAdjustment(adjustmentFunction_e adjustmentFunction, ui
 
 static void calcActiveAdjustmentRanges(void)
 {
+    // This initialisation upsets the scheduler task duration estimation
+    schedulerIgnoreTaskExecTime();
+
     adjustmentRange_t defaultAdjustmentRange;
     memset(&defaultAdjustmentRange, 0, sizeof(defaultAdjustmentRange));
 
@@ -782,45 +791,45 @@ static void processContinuosAdjustments(controlRateConfig_t *controlRateConfig)
         const adjustmentConfig_t *adjustmentConfig = &defaultAdjustmentConfigs[adjustmentRange->adjustmentConfig - ADJUSTMENT_FUNCTION_CONFIG_INDEX_OFFSET];
         const adjustmentFunction_e adjustmentFunction = adjustmentConfig->adjustmentFunction;
 
-        if (!isRangeActive(adjustmentRange->auxChannelIndex, &adjustmentRange->range) ||
-            adjustmentFunction == ADJUSTMENT_NONE ||
-            rcData[channelIndex] == adjustmentState->lastRcData) {
-            continue;
-        }
+        if (isRangeActive(adjustmentRange->auxChannelIndex, &adjustmentRange->range) &&
+            adjustmentFunction != ADJUSTMENT_NONE) {
 
-        adjustmentState->lastRcData = rcData[channelIndex];
+            if (rcData[channelIndex] != adjustmentState->lastRcData) {
+                int newValue = -1;
 
-        int newValue = -1;
+                if (adjustmentConfig->mode == ADJUSTMENT_MODE_SELECT) {
+                    int switchPositions = adjustmentConfig->data.switchPositions;
+                    if (adjustmentFunction == ADJUSTMENT_RATE_PROFILE && systemConfig()->rateProfile6PosSwitch) {
+                        switchPositions =  6;
+                    }
+                    const uint16_t rangeWidth = (2100 - 900) / switchPositions;
+                    const uint8_t position = (constrain(rcData[channelIndex], 900, 2100 - 1) - 900) / rangeWidth;
+                    newValue = applySelectAdjustment(adjustmentFunction, position);
 
-        if (adjustmentConfig->mode == ADJUSTMENT_MODE_SELECT) {
-            int switchPositions = adjustmentConfig->data.switchPositions;
-            if (adjustmentFunction == ADJUSTMENT_RATE_PROFILE && systemConfig()->rateProfile6PosSwitch) {
-                switchPositions =  6;
-            }
-            const uint16_t rangeWidth = (2100 - 900) / switchPositions;
-            const uint8_t position = (constrain(rcData[channelIndex], 900, 2100 - 1) - 900) / rangeWidth;
-            newValue = applySelectAdjustment(adjustmentFunction, position);
+                    setConfigDirtyIfNotPermanent(&adjustmentRange->range);
+                } else {
+                    // If setting is defined for step adjustment and center value has been specified, apply values directly (scaled) from aux channel
+                    if (adjustmentRange->adjustmentCenter &&
+                        (adjustmentConfig->mode == ADJUSTMENT_MODE_STEP)) {
+                        int value = (((rcData[channelIndex] - PWM_RANGE_MIDDLE) * adjustmentRange->adjustmentScale) / (PWM_RANGE_MIDDLE - PWM_RANGE_MIN)) + adjustmentRange->adjustmentCenter;
 
-            setConfigDirtyIfNotPermanent(&adjustmentRange->range);
-        } else {
-            // If setting is defined for step adjustment and center value has been specified, apply values directly (scaled) from aux channel
-            if (adjustmentRange->adjustmentCenter &&
-                (adjustmentConfig->mode == ADJUSTMENT_MODE_STEP)) {
-                int value = (((rcData[channelIndex] - PWM_RANGE_MIDDLE) * adjustmentRange->adjustmentScale) / (PWM_RANGE_MIDDLE - PWM_RANGE_MIN)) + adjustmentRange->adjustmentCenter;
+                        newValue = applyAbsoluteAdjustment(controlRateConfig, adjustmentFunction, value);
 
-                newValue = applyAbsoluteAdjustment(controlRateConfig, adjustmentFunction, value);
+                        setConfigDirtyIfNotPermanent(&adjustmentRange->range);
 
-                setConfigDirtyIfNotPermanent(&adjustmentRange->range);
-
-                pidInitConfig(currentPidProfile);
-            }
-        }
-
+                        pidInitConfig(currentPidProfile);
+                    }
+                }
 #if defined(USE_OSD) && defined(USE_OSD_ADJUSTMENTS)
-        updateOsdAdjustmentData(newValue, adjustmentConfig->adjustmentFunction);
+                updateOsdAdjustmentData(newValue, adjustmentConfig->adjustmentFunction);
 #else
-        UNUSED(newValue);
+                UNUSED(newValue);
 #endif
+                adjustmentState->lastRcData = rcData[channelIndex];
+            }
+        } else {
+            adjustmentState->lastRcData = 0;
+        }
     }
 }
 
@@ -830,6 +839,8 @@ void processRcAdjustments(controlRateConfig_t *controlRateConfig)
 
     // Recalculate the new active adjustments if required
     if (stepwiseAdjustmentCount == ADJUSTMENT_RANGE_COUNT_INVALID) {
+        // This can take up to 30us and is only call when not armed so ignore this timing as it doesn't impact flight
+        schedulerIgnoreTaskExecTime();
         calcActiveAdjustmentRanges();
     }
 

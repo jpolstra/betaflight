@@ -25,9 +25,9 @@
 #include "drivers/io_types.h"
 
 typedef enum {
-    EXTI_TRIGGER_RISING = 0,
-    EXTI_TRIGGER_FALLING = 1,
-    EXTI_TRIGGER_BOTH = 2
+    BETAFLIGHT_EXTI_TRIGGER_RISING = 0,
+    BETAFLIGHT_EXTI_TRIGGER_FALLING = 1,
+    BETAFLIGHT_EXTI_TRIGGER_BOTH = 2
 } extiTrigger_t;
 
 typedef struct extiCallbackRec_s extiCallbackRec_t;
@@ -42,4 +42,5 @@ void EXTIInit(void);
 void EXTIHandlerInit(extiCallbackRec_t *cb, extiHandlerCallback *fn);
 void EXTIConfig(IO_t io, extiCallbackRec_t *cb, int irqPriority, ioConfig_t config, extiTrigger_t trigger);
 void EXTIRelease(IO_t io);
-void EXTIEnable(IO_t io, bool enable);
+void EXTIEnable(IO_t io);
+void EXTIDisable(IO_t io);

@@ -20,7 +20,7 @@
 
 #include "platform.h"
 
-#if defined(USE_PWM) || defined(USE_PPM) || defined(USE_SERIAL_RX) || defined(USE_RX_MSP) || defined(USE_RX_SPI)
+#if defined(USE_RX_PWM) || defined(USE_RX_PPM) || defined(USE_SERIALRX) || defined(USE_RX_MSP) || defined(USE_RX_SPI)
 
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
@@ -34,11 +34,53 @@
 #include "rx/rx.h"
 #include "rx/rx_spi.h"
 
-PG_REGISTER_WITH_RESET_FN(rxConfig_t, rxConfig, PG_RX_CONFIG, 2);
+#ifndef SERIALRX_PROVIDER
+
+#if defined(USE_SERIALRX_CRSF)
+#define SERIALRX_PROVIDER SERIALRX_CRSF
+#elif defined(USE_SERIALRX_GHST)
+#define SERIALRX_PROVIDER SERIALRX_GHST
+#elif defined(USE_SERIALRX_IBUS)
+#define SERIALRX_PROVIDER SERIALRX_IBUS
+#elif defined(USE_SERIALRX_SBUS)
+#define SERIALRX_PROVIDER SERIALRX_SBUS
+#elif defined(USE_SERIALRX_SPEKTRUM)
+#if defined(USE_TELEMETRY_SRXL)
+#define SERIALRX_PROVIDER SERIALRX_SRXL
+#else
+#define SERIALRX_PROVIDER SERIALRX_SPEKTRUM2048
+#endif
+#elif defined(USE_SERIALRX_FPORT)
+#define SERIALRX_PROVIDER SERIALRX_FPORT
+#elif defined(USE_SERIALRX_XBUS)
+#define SERIALRX_PROVIDER SERIALRX_XBUS_MODE_B
+#elif defined(USE_SERIALRX_SRXL2)
+#define SERIALRX_PROVIDER SERIALRX_SRXL2
+#elif defined(USE_SERIALRX_JETIEXBUS)
+#define SERIALRX_PROVIDER SERIALRX_JETIEXBUS
+#elif defined(USE_SERIALRX_SUMD)
+#define SERIALRX_PROVIDER SERIALRX_SUMD
+#elif defined(USE_SERIALRX_SUMH)
+#define SERIALRX_PROVIDER SERIALRX_SUMH
+#else
+#define SERIALRX_PROVIDER SERIALRX_NONE
+#endif
+
+#endif
+
+#ifndef SERIALRX_HALFDUPLEX
+#if (defined(USE_SERIALRX_FPORT) || defined(USE_SERIALRX_SRXL2)) && !(defined(USE_SERIALRX_CRSF) && defined(USE_SERIALRX_GHST) && defined(USE_SERIALRX_IBUS) && defined(USE_SERIALRX_SBUS) && defined(USE_SERIALRX_SPEKTRUM) && defined(USE_SERIALRX_XBUS))
+#define SERIALRX_HALFDUPLEX 1
+#else
+#define SERIALRX_HALFDUPLEX 0
+#endif
+#endif
+
+PG_REGISTER_WITH_RESET_FN(rxConfig_t, rxConfig, PG_RX_CONFIG, 4);
 void pgResetFn_rxConfig(rxConfig_t *rxConfig)
 {
     RESET_CONFIG_2(rxConfig_t, rxConfig,
-        .halfDuplex = 0,
+        .halfDuplex = SERIALRX_HALFDUPLEX,
         .serialrx_provider = SERIALRX_PROVIDER,
         .serialrx_inverted = 0,
         .spektrum_bind_pin_override_ioTag = IO_TAG(SPEKTRUM_BIND_PIN),
@@ -56,22 +98,22 @@ void pgResetFn_rxConfig(rxConfig_t *rxConfig)
         .rssi_offset = 0,
         .rssi_invert = 0,
         .rssi_src_frame_lpf_period = 30,
-        .rcInterpolation = RC_SMOOTHING_AUTO,
-        .rcInterpolationChannels = INTERPOLATION_CHANNELS_RPYT,
-        .rcInterpolationInterval = 19,
+        .rssi_smoothing = 125,
         .fpvCamAngleDegrees = 0,
         .airModeActivateThreshold = 25,
         .max_aux_channel = DEFAULT_AUX_CHANNEL_COUNT,
-        .rc_smoothing_type = RC_SMOOTHING_TYPE_FILTER,
-        .rc_smoothing_input_cutoff = 0,      // automatically calculate the cutoff by default
-        .rc_smoothing_derivative_cutoff = 0, // automatically calculate the cutoff by default
-        .rc_smoothing_debug_axis = ROLL,     // default to debug logging for the roll axis
-        .rc_smoothing_input_type = RC_SMOOTHING_INPUT_BIQUAD,
-        .rc_smoothing_derivative_type = RC_SMOOTHING_DERIVATIVE_BIQUAD,
-        .rc_smoothing_auto_factor = 10,
+        .rc_smoothing_mode = 1,
+        .rc_smoothing_setpoint_cutoff = 0,
+        .rc_smoothing_feedforward_cutoff = 0,
+        .rc_smoothing_throttle_cutoff = 0,
+        .rc_smoothing_debug_axis = ROLL,
+        .rc_smoothing_auto_factor_rpy = 30,
+        .rc_smoothing_auto_factor_throttle = 30,
         .srxl2_unit_id = 1,
         .srxl2_baud_fast = true,
         .sbus_baud_fast = false,
+        .msp_override_channels_mask = 0,
+        .crsf_use_negotiated_baud = false,
     );
 
 #ifdef RX_CHANNELS_TAER

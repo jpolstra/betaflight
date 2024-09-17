@@ -19,13 +19,15 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <math.h>
 
 #include "platform.h"
 
 #include "build/build_config.h"
 
-#include "axis.h"
+#include "common/axis.h"
+
 #include "maths.h"
 
 #if defined(FAST_MATH) || defined(VERY_FAST_MATH)
@@ -104,6 +106,12 @@ float acos_approx(float x)
     else
         return result;
 }
+
+float asin_approx(float x)
+{
+    return (M_PIf * 0.5f) - acos_approx(x);
+}
+
 #endif
 
 int gcd(int num, int denom)
@@ -115,16 +123,9 @@ int gcd(int num, int denom)
     return gcd(denom, num % denom);
 }
 
-float powerf(float base, int exp) {
-    float result = base;
-    for (int count = 1; count < exp; count++) result *= base;
-
-    return result;
-}
-
 int32_t applyDeadband(const int32_t value, const int32_t deadband)
 {
-    if (ABS(value) < deadband) {
+    if (abs(value) < deadband) {
         return 0;
     }
 
@@ -174,79 +175,18 @@ float degreesToRadians(int16_t degrees)
     return degrees * RAD;
 }
 
-int scaleRange(int x, int srcFrom, int srcTo, int destFrom, int destTo) {
+int scaleRange(int x, int srcFrom, int srcTo, int destFrom, int destTo)
+{
     long int a = ((long int) destTo - (long int) destFrom) * ((long int) x - (long int) srcFrom);
     long int b = (long int) srcTo - (long int) srcFrom;
     return (a / b) + destFrom;
 }
 
-float scaleRangef(float x, float srcFrom, float srcTo, float destFrom, float destTo) {
+float scaleRangef(float x, float srcFrom, float srcTo, float destFrom, float destTo)
+{
     float a = (destTo - destFrom) * (x - srcFrom);
     float b = srcTo - srcFrom;
     return (a / b) + destFrom;
-}
-
-// Normalize a vector
-void normalizeV(struct fp_vector *src, struct fp_vector *dest)
-{
-    float length;
-
-    length = sqrtf(src->X * src->X + src->Y * src->Y + src->Z * src->Z);
-    if (length != 0) {
-        dest->X = src->X / length;
-        dest->Y = src->Y / length;
-        dest->Z = src->Z / length;
-    }
-}
-
-void buildRotationMatrix(fp_angles_t *delta, fp_rotationMatrix_t *rotation)
-{
-    float cosx, sinx, cosy, siny, cosz, sinz;
-    float coszcosx, sinzcosx, coszsinx, sinzsinx;
-
-    cosx = cos_approx(delta->angles.roll);
-    sinx = sin_approx(delta->angles.roll);
-    cosy = cos_approx(delta->angles.pitch);
-    siny = sin_approx(delta->angles.pitch);
-    cosz = cos_approx(delta->angles.yaw);
-    sinz = sin_approx(delta->angles.yaw);
-
-    coszcosx = cosz * cosx;
-    sinzcosx = sinz * cosx;
-    coszsinx = sinx * cosz;
-    sinzsinx = sinx * sinz;
-
-    rotation->m[0][X] = cosz * cosy;
-    rotation->m[0][Y] = -cosy * sinz;
-    rotation->m[0][Z] = siny;
-    rotation->m[1][X] = sinzcosx + (coszsinx * siny);
-    rotation->m[1][Y] = coszcosx - (sinzsinx * siny);
-    rotation->m[1][Z] = -sinx * cosy;
-    rotation->m[2][X] = (sinzsinx) - (coszcosx * siny);
-    rotation->m[2][Y] = (coszsinx) + (sinzcosx * siny);
-    rotation->m[2][Z] = cosy * cosx;
-}
-
-FAST_CODE void applyRotation(float *v, fp_rotationMatrix_t *rotationMatrix)
-{
-    struct fp_vector *vDest = (struct fp_vector *)v;
-    struct fp_vector vTmp = *vDest;
-
-    vDest->X = (rotationMatrix->m[0][X] * vTmp.X + rotationMatrix->m[1][X] * vTmp.Y + rotationMatrix->m[2][X] * vTmp.Z);
-    vDest->Y = (rotationMatrix->m[0][Y] * vTmp.X + rotationMatrix->m[1][Y] * vTmp.Y + rotationMatrix->m[2][Y] * vTmp.Z);
-    vDest->Z = (rotationMatrix->m[0][Z] * vTmp.X + rotationMatrix->m[1][Z] * vTmp.Y + rotationMatrix->m[2][Z] * vTmp.Z);
-}
-
-// Rotate a vector *v by the euler angles defined by the 3-vector *delta.
-void rotateV(struct fp_vector *v, fp_angles_t *delta)
-{
-    struct fp_vector v_tmp = *v;
-
-    fp_rotationMatrix_t rotationMatrix;
-
-    buildRotationMatrix(delta, &rotationMatrix);
-
-    applyRotation((float *)&v_tmp, &rotationMatrix);
 }
 
 // Quick median filter implementation
@@ -258,7 +198,7 @@ void rotateV(struct fp_vector *v, fp_angles_t *delta)
 #define QMF_SORTF(a,b) { if ((a)>(b)) QMF_SWAPF((a),(b)); }
 #define QMF_SWAPF(a,b) { float temp=(a);(a)=(b);(b)=temp; }
 
-int32_t quickMedianFilter3(int32_t * v)
+int32_t quickMedianFilter3(const int32_t * v)
 {
     int32_t p[3];
     QMF_COPY(p, v, 3);
@@ -267,7 +207,7 @@ int32_t quickMedianFilter3(int32_t * v)
     return p[1];
 }
 
-int32_t quickMedianFilter5(int32_t * v)
+int32_t quickMedianFilter5(const int32_t * v)
 {
     int32_t p[5];
     QMF_COPY(p, v, 5);
@@ -278,7 +218,7 @@ int32_t quickMedianFilter5(int32_t * v)
     return p[2];
 }
 
-int32_t quickMedianFilter7(int32_t * v)
+int32_t quickMedianFilter7(const int32_t * v)
 {
     int32_t p[7];
     QMF_COPY(p, v, 7);
@@ -291,7 +231,7 @@ int32_t quickMedianFilter7(int32_t * v)
     return p[3];
 }
 
-int32_t quickMedianFilter9(int32_t * v)
+int32_t quickMedianFilter9(const int32_t * v)
 {
     int32_t p[9];
     QMF_COPY(p, v, 9);
@@ -306,7 +246,7 @@ int32_t quickMedianFilter9(int32_t * v)
     return p[4];
 }
 
-float quickMedianFilter3f(float * v)
+float quickMedianFilter3f(const float * v)
 {
     float p[3];
     QMF_COPY(p, v, 3);
@@ -315,7 +255,7 @@ float quickMedianFilter3f(float * v)
     return p[1];
 }
 
-float quickMedianFilter5f(float * v)
+float quickMedianFilter5f(const float * v)
 {
     float p[5];
     QMF_COPY(p, v, 5);
@@ -326,7 +266,7 @@ float quickMedianFilter5f(float * v)
     return p[2];
 }
 
-float quickMedianFilter7f(float * v)
+float quickMedianFilter7f(const float * v)
 {
     float p[7];
     QMF_COPY(p, v, 7);
@@ -339,7 +279,7 @@ float quickMedianFilter7f(float * v)
     return p[3];
 }
 
-float quickMedianFilter9f(float * v)
+float quickMedianFilter9f(const float * v)
 {
     float p[9];
     QMF_COPY(p, v, 9);
@@ -354,21 +294,47 @@ float quickMedianFilter9f(float * v)
     return p[4];
 }
 
-void arraySubInt32(int32_t *dest, int32_t *array1, int32_t *array2, int count)
+void arraySubInt32(int32_t *dest, const int32_t *array1, const int32_t *array2, int count)
 {
     for (int i = 0; i < count; i++) {
         dest[i] = array1[i] - array2[i];
     }
 }
 
-int16_t qPercent(fix12_t q) {
+int16_t qPercent(fix12_t q)
+{
     return (100 * q) >> 12;
 }
 
-int16_t qMultiply(fix12_t q, int16_t input) {
+int16_t qMultiply(fix12_t q, int16_t input)
+{
     return (input *  q) >> 12;
 }
 
-fix12_t  qConstruct(int16_t num, int16_t den) {
+fix12_t  qConstruct(int16_t num, int16_t den)
+{
     return (num << 12) / den;
+}
+
+// Cubic polynomial blending function
+static float cubicBlend(const float t)
+{
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// Smooth step-up transition function from 0 to 1
+float smoothStepUpTransition(const float x, const float center, const float width)
+{
+    const float half_width = width * 0.5f;
+    const float left_limit = center - half_width;
+    const float right_limit = center + half_width;
+
+    if (x < left_limit) {
+        return 0.0f;
+    } else if (x > right_limit) {
+        return 1.0f;
+    } else {
+        const float t = (x - left_limit) / width; // Normalize x within the range
+        return cubicBlend(t);
+    }
 }

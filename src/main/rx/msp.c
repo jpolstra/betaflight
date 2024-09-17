@@ -35,17 +35,18 @@
 
 static uint16_t mspFrame[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 static bool rxMspFrameDone = false;
+static bool rxMspOverrideFrameDone = false;
 
-static uint16_t rxMspReadRawRC(const rxRuntimeConfig_t *rxRuntimeConfig, uint8_t chan)
+float rxMspReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
 {
-    UNUSED(rxRuntimeConfig);
+    UNUSED(rxRuntimeState);
     return mspFrame[chan];
 }
 
 /*
  * Called from MSP command handler - mspFcProcessCommand
  */
-void rxMspFrameReceive(uint16_t *frame, int channelCount)
+void rxMspFrameReceive(const uint16_t *frame, int channelCount)
 {
     for (int i = 0; i < channelCount; i++) {
         mspFrame[i] = frame[i];
@@ -57,11 +58,12 @@ void rxMspFrameReceive(uint16_t *frame, int channelCount)
     }
 
     rxMspFrameDone = true;
+    rxMspOverrideFrameDone = true;
 }
 
-static uint8_t rxMspFrameStatus(rxRuntimeConfig_t *rxRuntimeConfig)
+static uint8_t rxMspFrameStatus(rxRuntimeState_t *rxRuntimeState)
 {
-    UNUSED(rxRuntimeConfig);
+    UNUSED(rxRuntimeState);
 
     if (!rxMspFrameDone) {
         return RX_FRAME_PENDING;
@@ -71,14 +73,24 @@ static uint8_t rxMspFrameStatus(rxRuntimeConfig_t *rxRuntimeConfig)
     return RX_FRAME_COMPLETE;
 }
 
-void rxMspInit(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+#if defined(USE_RX_MSP_OVERRIDE)
+uint8_t rxMspOverrideFrameStatus(void)
+{
+    if (!rxMspOverrideFrameDone) {
+        return RX_FRAME_PENDING;
+    }
+
+    rxMspOverrideFrameDone = false;
+    return RX_FRAME_COMPLETE;
+}
+#endif
+
+void rxMspInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
 {
     UNUSED(rxConfig);
 
-    rxRuntimeConfig->channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT;
-    rxRuntimeConfig->rxRefreshRate = 20000;
-
-    rxRuntimeConfig->rcReadRawFn = rxMspReadRawRC;
-    rxRuntimeConfig->rcFrameStatusFn = rxMspFrameStatus;
+    rxRuntimeState->channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT;
+    rxRuntimeState->rcReadRawFn = rxMspReadRawRC;
+    rxRuntimeState->rcFrameStatusFn = rxMspFrameStatus;
 }
 #endif

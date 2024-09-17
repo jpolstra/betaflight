@@ -27,25 +27,35 @@
 
 #if defined(STM32F4) || defined(STM32F7)
 #define ADC_TAG_MAP_COUNT 16
+#elif defined(AT32F435)
+#ifdef USE_ADC_INTERNAL
+#define ADC_TAG_MAP_COUNT 18
+#else
+#define ADC_TAG_MAP_COUNT 16
+#endif
 #elif defined(STM32H7)
 #ifdef USE_ADC_INTERNAL
 #define ADC_TAG_MAP_COUNT 30
 #else
 #define ADC_TAG_MAP_COUNT 28
 #endif
-#elif defined(STM32F3)
-#define ADC_TAG_MAP_COUNT 39
+#elif defined(STM32G4)
+#ifdef USE_ADC_INTERNAL
+#define ADC_TAG_MAP_COUNT 49
+#else
+#define ADC_TAG_MAP_COUNT 47
+#endif
+#elif defined(APM32F4)
+#define ADC_TAG_MAP_COUNT 16
 #else
 #define ADC_TAG_MAP_COUNT 10
 #endif
 
 typedef struct adcTagMap_s {
     ioTag_t tag;
-#if !defined(STM32F1) // F1 pins have uniform connection to ADC instances
     uint8_t devices;
-#endif
     uint32_t channel;
-#if defined(STM32H7)
+#if defined(STM32H7) || defined(STM32G4) || defined(AT32F435)
     uint8_t channelOrdinal;
 #endif
 } adcTagMap_t;
@@ -56,24 +66,26 @@ typedef struct adcTagMap_s {
 #define ADC_DEVICES_2   (1 << ADCDEV_2)
 #define ADC_DEVICES_3   (1 << ADCDEV_3)
 #define ADC_DEVICES_4   (1 << ADCDEV_4)
+#define ADC_DEVICES_5   (1 << ADCDEV_5)
 #define ADC_DEVICES_12  ((1 << ADCDEV_1)|(1 << ADCDEV_2))
 #define ADC_DEVICES_34  ((1 << ADCDEV_3)|(1 << ADCDEV_4))
 #define ADC_DEVICES_123 ((1 << ADCDEV_1)|(1 << ADCDEV_2)|(1 << ADCDEV_3))
+#define ADC_DEVICES_345 ((1 << ADCDEV_3)|(1 << ADCDEV_4)|(1 << ADCDEV_5))
 
 typedef struct adcDevice_s {
     ADC_TypeDef* ADCx;
     rccPeriphTag_t rccADC;
 #if !defined(USE_DMA_SPEC)
     dmaResource_t* dmaResource;
-#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7)
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(APM32F4)
     uint32_t channel;
 #endif
 #endif // !defined(USE_DMA_SPEC)
-#if defined(STM32F7) || defined(STM32H7)
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(APM32F4)
     ADC_HandleTypeDef ADCHandle;
     DMA_HandleTypeDef DmaHandle;
 #endif
-#if defined(STM32H7)
+#if defined(STM32H7) || defined(STM32G4)
     uint8_t irq;
     uint32_t channelBits;
 #endif
@@ -92,7 +104,7 @@ extern adcOperatingConfig_t adcOperatingConfig[ADC_CHANNEL_COUNT];
 extern volatile uint16_t adcValues[ADC_CHANNEL_COUNT];
 
 uint8_t adcChannelByTag(ioTag_t ioTag);
-ADCDevice adcDeviceByInstance(ADC_TypeDef *instance);
+ADCDevice adcDeviceByInstance(const ADC_TypeDef *instance);
 bool adcVerifyPin(ioTag_t tag, ADCDevice device);
 
 // Marshall values in DMA instance/channel based order to adcChannel based order.
@@ -134,4 +146,13 @@ void adcGetChannelValues(void);
 #define TEMPSENSOR_CAL_VREFANALOG          (3300U)
 #define TEMPSENSOR_CAL1_TEMP               ((int32_t)  30)
 #define TEMPSENSOR_CAL2_TEMP               ((int32_t) 110)
+#endif
+
+#ifdef AT32F435
+#define VREFINT_EXPECTED                   (1489U)  // The raw ADC reading at 12bit resolution expected for the 1V2 internal ref
+#define VREFINT_CAL_VREF                   (3300U)  // The nominal external Vref+ for the above reading
+#define TEMPSENSOR_CAL_VREFANALOG          (3300U)
+#define TEMPSENSOR_CAL1_TEMP               (25U)
+#define TEMPSENSOR_CAL1_V                  (1.27f)
+#define TEMPSENSOR_SLOPE                   (-4.13f) //  mV/C
 #endif

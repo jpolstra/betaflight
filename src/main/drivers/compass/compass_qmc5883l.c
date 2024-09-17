@@ -67,77 +67,98 @@
 #define QMC5883L_RST 0x80
 
 #define QMC5883L_REG_DATA_OUTPUT_X 0x00
+#define QMC5883L_REG_DATA_UNLOCK 0x05
 #define QMC5883L_REG_STATUS 0x06
+#define QMC5883L_REG_STATUS_DRDY 0x01
+#define QMC5883L_REG_STATUS_OVL  0x02
+#define QMC5883L_REG_STATUS_DOR  0x04
 
 #define QMC5883L_REG_ID 0x0D
 #define QMC5883_ID_VAL 0xFF
 
 static bool qmc5883lInit(magDev_t *magDev)
 {
-    UNUSED(magDev);
-
     bool ack = true;
-    busDevice_t *busdev = &magDev->busdev;
+    extDevice_t *dev = &magDev->dev;
 
-    ack = ack && busWriteRegister(busdev, 0x0B, 0x01);
-    ack = ack && busWriteRegister(busdev, QMC5883L_REG_CONF1, QMC5883L_MODE_CONTINUOUS | QMC5883L_ODR_200HZ | QMC5883L_OSR_512 | QMC5883L_RNG_8G);
+    busDeviceRegister(dev);
+
+    ack = ack && busWriteRegister(dev, 0x0B, 0x01);
+    ack = ack && busWriteRegister(dev, QMC5883L_REG_CONF1, QMC5883L_MODE_CONTINUOUS | QMC5883L_ODR_200HZ | QMC5883L_OSR_512 | QMC5883L_RNG_8G);
 
     if (!ack) {
         return false;
     }
 
+    magDev->magOdrHz = 200; // QMC5883L_ODR_200HZ
     return true;
 }
 
 static bool qmc5883lRead(magDev_t *magDev, int16_t *magData)
 {
-    uint8_t status;
-    uint8_t buf[6];
+    static uint8_t buf[6];
+    static uint8_t status = 0; // request status on first read
+    static enum {
+        STATE_WAIT_DRDY,
+        STATE_READ,
+    } state = STATE_WAIT_DRDY;
 
-    // set magData to zero for case of failed read
-    magData[X] = 0;
-    magData[Y] = 0;
-    magData[Z] = 0;
+    extDevice_t *dev = &magDev->dev;
 
-    busDevice_t *busdev = &magDev->busdev;
+    switch (state) {
+        default:
+        case STATE_WAIT_DRDY:
+            if (status & QMC5883L_REG_STATUS_DRDY) {
+                // New data is available
+                if (busReadRegisterBufferStart(dev, QMC5883L_REG_DATA_OUTPUT_X, buf, sizeof(buf))) {
+                    state = STATE_READ;
+                }
+            } else if (status & QMC5883L_REG_STATUS_DOR) {
+                // Data overrun (and data not ready). Data registers may be locked, read unlock regiter (ZH)
+                if (busReadRegisterBufferStart(dev, QMC5883L_REG_DATA_UNLOCK, buf + sizeof(buf) - 1, 1)) {
+                    status = 0;   // force status read next
+                }
+            } else {
+                // Read status register to check for data ready - status will be untouched if read fails
+                busReadRegisterBufferStart(dev, QMC5883L_REG_STATUS, &status, sizeof(status));
+            }
+            return false;
 
-    bool ack = busReadRegisterBuffer(busdev, QMC5883L_REG_STATUS, &status, 1);
+        case STATE_READ:
+            magData[X] = (int16_t)(buf[1] << 8 | buf[0]);
+            magData[Y] = (int16_t)(buf[3] << 8 | buf[2]);
+            magData[Z] = (int16_t)(buf[5] << 8 | buf[4]);
 
-    if (!ack || (status & 0x04) == 0) {
-        return false;
+            state = STATE_WAIT_DRDY;
+
+            // Indicate that new data is required
+            status = 0;
+
+            return true;
     }
 
-    ack = busReadRegisterBuffer(busdev, QMC5883L_REG_DATA_OUTPUT_X, buf, 6);
-    if (!ack) {
-        return false;
-    }
-
-    magData[X] = (int16_t)(buf[1] << 8 | buf[0]);
-    magData[Y] = (int16_t)(buf[3] << 8 | buf[2]);
-    magData[Z] = (int16_t)(buf[5] << 8 | buf[4]);
-
-    return true;
+    return false;
 }
 
 bool qmc5883lDetect(magDev_t *magDev)
 {
 
-    busDevice_t *busdev = &magDev->busdev;
+    extDevice_t *dev = &magDev->dev;
 
-    if (busdev->bustype == BUSTYPE_I2C && busdev->busdev_u.i2c.address == 0) {
-        busdev->busdev_u.i2c.address = QMC5883L_MAG_I2C_ADDRESS;
+    if (dev->bus->busType == BUS_TYPE_I2C && dev->busType_u.i2c.address == 0) {
+        dev->busType_u.i2c.address = QMC5883L_MAG_I2C_ADDRESS;
     }
 
     // Must write reset first  - don't care about the result
-    busWriteRegister(busdev, QMC5883L_REG_CONF2, QMC5883L_RST);
+    busWriteRegister(dev, QMC5883L_REG_CONF2, QMC5883L_RST);
     delay(20);
 
     uint8_t sig = 0;
-    bool ack = busReadRegisterBuffer(busdev, QMC5883L_REG_ID, &sig, 1);
+    bool ack = busReadRegisterBuffer(dev, QMC5883L_REG_ID, &sig, 1);
     if (ack && sig == QMC5883_ID_VAL) {
         // Should be in standby mode after soft reset and sensor is really present
         // Reading ChipID of 0xFF alone is not sufficient to be sure the QMC is present
-        ack = busReadRegisterBuffer(busdev, QMC5883L_REG_CONF1, &sig, 1);
+        ack = busReadRegisterBuffer(dev, QMC5883L_REG_CONF1, &sig, 1);
         if (ack && sig != QMC5883L_MODE_STANDBY) {
             return false;
         }

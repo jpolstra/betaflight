@@ -44,13 +44,15 @@
 #include <stdio.h>
 #endif
 
-#include "asyncfatfs.h"
-
-#include "fat_standard.h"
-#include "drivers/sdcard.h"
 #include "common/maths.h"
 #include "common/time.h"
 #include "common/utils.h"
+
+#include "drivers/sdcard.h"
+
+#include "fat_standard.h"
+
+#include "asyncfatfs.h"
 
 #ifdef AFATFS_DEBUG
     #define ONLY_EXPOSE_FOR_TESTING
@@ -58,7 +60,7 @@
     #define ONLY_EXPOSE_FOR_TESTING static
 #endif
 
-#define AFATFS_NUM_CACHE_SECTORS 10
+#define AFATFS_NUM_CACHE_SECTORS 11
 
 // FAT filesystems are allowed to differ from these parameters, but we choose not to support those weird filesystems:
 #define AFATFS_SECTOR_SIZE  512
@@ -512,7 +514,7 @@ typedef struct afatfs_t {
 } afatfs_t;
 
 #ifdef STM32H7
-static DMA_RW_AXI uint8_t afatfs_cache[AFATFS_SECTOR_SIZE * AFATFS_NUM_CACHE_SECTORS] __attribute__((aligned(32)));
+static DMA_DATA_ZERO_INIT uint8_t afatfs_cache[AFATFS_SECTOR_SIZE * AFATFS_NUM_CACHE_SECTORS] __attribute__((aligned(32)));
 #endif
 
 static afatfs_t afatfs;
@@ -605,7 +607,7 @@ static uint8_t *afatfs_cacheSectorGetMemory(int cacheEntryIndex)
     return afatfs.cache + cacheEntryIndex * AFATFS_SECTOR_SIZE;
 }
 
-static int afatfs_getCacheDescriptorIndexForBuffer(uint8_t *memory)
+static int afatfs_getCacheDescriptorIndexForBuffer(const uint8_t *memory)
 {
     int index = (memory - afatfs.cache) / AFATFS_SECTOR_SIZE;
 
@@ -734,6 +736,18 @@ static void afatfs_cacheFlushSector(int cacheIndex)
         default:
             ;
     }
+}
+
+// Check whether every sector in the cache that can be flushed has been synchronized
+bool afatfs_sectorCacheInSync(void)
+{
+    for (int i = 0; i < AFATFS_NUM_CACHE_SECTORS; i++) {
+        if ((afatfs.cacheDescriptor[i].state == AFATFS_CACHE_STATE_WRITING) ||
+            ((afatfs.cacheDescriptor[i].state == AFATFS_CACHE_STATE_DIRTY) && !afatfs.cacheDescriptor[i].locked)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
@@ -2127,7 +2141,7 @@ afatfsOperationStatus_e afatfs_fseek(afatfsFilePtr_t file, int32_t offset, afatf
         break;
 
         case AFATFS_SEEK_SET:
-            FALLTHROUGH;
+        break;
     }
 
     // Now we have a SEEK_SET with a positive offset. Begin by seeking to the start of the file
@@ -2280,7 +2294,7 @@ static afatfsOperationStatus_e afatfs_extendSubdirectoryContinue(afatfsFile_t *d
             }
 
             // Seek back to the beginning of the cluster
-            afatfs_assert(afatfs_fseekAtomic(directory, -AFATFS_SECTOR_SIZE * (afatfs.sectorsPerCluster - 1)));
+            afatfs_assert(afatfs_fseekAtomic(directory, -(AFATFS_SECTOR_SIZE * ((int32_t)afatfs.sectorsPerCluster - 1))));
             opState->phase = AFATFS_EXTEND_SUBDIRECTORY_PHASE_SUCCESS;
             goto doMore;
         break;
@@ -2601,8 +2615,18 @@ static void afatfs_createFileContinue(afatfsFile_t *file)
                                 opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
                                 goto doMore;
                             }
+                        } else if (entry->attrib & FAT_FILE_ATTRIBUTE_VOLUME_ID) {
+                            break;
                         } else if (strncmp(entry->filename, (char*) opState->filename, FAT_FILENAME_LENGTH) == 0) {
-                            // We found a file with this name!
+                            // We found a file or directory with this name!
+
+                            // Do not open file as dir or dir as file
+                            if (((entry->attrib ^ file->attrib) & FAT_FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                                afatfs_findLast(&afatfs.currentDirectory);
+                                opState->phase = AFATFS_CREATEFILE_PHASE_FAILURE;
+                                goto doMore;
+                            }
+
                             afatfs_fileLoadDirectoryEntry(file, entry);
 
                             afatfs_findLast(&afatfs.currentDirectory);

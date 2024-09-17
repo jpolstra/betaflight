@@ -28,7 +28,16 @@ typedef enum {
     RATES_TYPE_BETAFLIGHT = 0,
     RATES_TYPE_RACEFLIGHT,
     RATES_TYPE_KISS,
+    RATES_TYPE_ACTUAL,
+    RATES_TYPE_QUICK,
+    RATES_TYPE_COUNT    // must be the final entry
 } ratesType_e;
+
+typedef struct ratesSettingsLimits_s {
+    uint8_t rc_rate_limit;
+    uint8_t srate_limit;
+    uint8_t expo_limit;
+} ratesSettingsLimits_t;
 
 typedef enum {
     THROTTLE_LIMIT_TYPE_OFF = 0,
@@ -36,11 +45,6 @@ typedef enum {
     THROTTLE_LIMIT_TYPE_CLIP,
     THROTTLE_LIMIT_TYPE_COUNT   // must be the last entry
 } throttleLimitType_e;
-
-typedef enum {
-    TPA_MODE_PD,
-    TPA_MODE_D
-} tpaMode_e;
 
 #define MAX_RATE_PROFILE_NAME_LENGTH 8u
 
@@ -51,18 +55,17 @@ typedef struct controlRateConfig_s {
     uint8_t rcRates[3];
     uint8_t rcExpo[3];
     uint8_t rates[3];
-    uint8_t dynThrPID;
-    uint16_t tpa_breakpoint;                // Breakpoint where TPA is activated
     uint8_t throttle_limit_type;            // Sets the throttle limiting type - off, scale or clip
     uint8_t throttle_limit_percent;         // Sets the maximum pilot commanded throttle limit
     uint16_t rate_limit[3];                 // Sets the maximum rate for the axes
-    uint8_t tpaMode;                        // Controls which PID terms TPA effects
     char profileName[MAX_RATE_PROFILE_NAME_LENGTH + 1]; // Descriptive name for rate profile
+    uint8_t quickRatesRcExpo;               // Sets expo on rc command for quick rates
 } controlRateConfig_t;
 
 PG_DECLARE_ARRAY(controlRateConfig_t, CONTROL_RATE_PROFILE_COUNT, controlRateProfiles);
 
 extern controlRateConfig_t *currentControlRateProfile;
+extern const ratesSettingsLimits_t ratesSettingLimits[RATES_TYPE_COUNT];
 
 void loadControlRateProfile(void);
 void changeControlRateProfile(uint8_t controlRateProfileIndex);

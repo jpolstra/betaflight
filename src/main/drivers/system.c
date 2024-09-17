@@ -26,13 +26,16 @@
 
 #include "build/atomic.h"
 
+#include "drivers/io.h"
 #include "drivers/light_led.h"
 #include "drivers/nvic.h"
+#include "drivers/resource.h"
 #include "drivers/sound_beeper.h"
+
 
 #include "system.h"
 
-#if defined(STM32F3) || defined(STM32F4) || defined(STM32F7) || defined(STM32H7)
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(AT32F4) || defined(APM32F4)
 // See "RM CoreSight Architecture Specification"
 // B2.3.10  "LSR and LAR, Software Lock Status Register and Software Lock Access Register"
 // "E1.2.11  LAR, Lock Access Register"
@@ -43,6 +46,7 @@
 
 // cycles per microsecond
 static uint32_t usTicks = 0;
+static float usTicksInv = 0.0f;
 // current uptime for 1kHz systick timer. will rollover after 49 days. hopefully we won't care.
 static volatile uint32_t sysTickUptime = 0;
 static volatile uint32_t sysTickValStamp = 0;
@@ -54,19 +58,26 @@ void cycleCounterInit(void)
 {
 #if defined(USE_HAL_DRIVER)
     cpuClockFrequency = HAL_RCC_GetSysClockFreq();
+#elif defined(USE_ATBSP_DRIVER)
+    crm_clocks_freq_type clocks;
+    crm_clocks_freq_get(&clocks);
+    cpuClockFrequency = clocks.sclk_freq;
 #else
     RCC_ClocksTypeDef clocks;
     RCC_GetClocksFreq(&clocks);
     cpuClockFrequency = clocks.SYSCLK_Frequency;
 #endif
     usTicks = cpuClockFrequency / 1000000;
+    usTicksInv = 1e6f / cpuClockFrequency;
 
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 
 #if defined(DWT_LAR_UNLOCK_VALUE)
-#if defined(STM32F7) || defined(STM32H7)
+#if defined(STM32H7) || defined(AT32F4)
+    ITM->LAR = DWT_LAR_UNLOCK_VALUE;
+#elif defined(STM32F7)
     DWT->LAR = DWT_LAR_UNLOCK_VALUE;
-#elif defined(STM32F3) || defined(STM32F4)
+#elif defined(STM32F4) || defined(APM32F4)
     // Note: DWT_Type does not contain LAR member.
 #define DWT_LAR
     __O uint32_t *DWTLAR = (uint32_t *)(DWT_BASE + 0x0FB0);
@@ -98,7 +109,7 @@ void SysTick_Handler(void)
 
 // Return system uptime in microseconds (rollover in 70minutes)
 
-uint32_t microsISR(void)
+MMFLASH_CODE_NOINLINE uint32_t microsISR(void)
 {
     register uint32_t ms, pending, cycle_cnt;
 
@@ -143,14 +154,36 @@ uint32_t micros(void)
     return (ms * 1000) + (usTicks * 1000 - cycle_cnt) / usTicks;
 }
 
-inline uint32_t getCycleCounter(void)
+uint32_t getCycleCounter(void)
 {
     return DWT->CYCCNT;
 }
 
-uint32_t clockCyclesToMicros(uint32_t clockCycles)
+int32_t clockCyclesToMicros(int32_t clockCycles)
 {
     return clockCycles / usTicks;
+}
+
+float clockCyclesToMicrosf(int32_t clockCycles)
+{
+    return clockCycles * usTicksInv;
+}
+
+// Note that this conversion is signed as this is used for periods rather than absolute timestamps
+int32_t clockCyclesTo10thMicros(int32_t clockCycles)
+{
+    return 10 * clockCycles / (int32_t)usTicks;
+}
+
+// Note that this conversion is signed as this is used for periods rather than absolute timestamps
+int32_t clockCyclesTo100thMicros(int32_t clockCycles)
+{
+    return 100 * clockCycles / (int32_t)usTicks;
+}
+
+uint32_t clockMicrosToCycles(uint32_t micros)
+{
+    return micros * usTicks;
 }
 
 // Return system uptime in milliseconds (rollover in 49 days)
@@ -246,18 +279,61 @@ void failureMode(failureMode_e mode)
 void initialiseMemorySections(void)
 {
 #ifdef USE_ITCM_RAM
-    /* Load functions into ITCM RAM */
+    /* Load fast-functions into ITCM RAM */
     extern uint8_t tcm_code_start;
     extern uint8_t tcm_code_end;
     extern uint8_t tcm_code;
     memcpy(&tcm_code_start, &tcm_code, (size_t) (&tcm_code_end - &tcm_code_start));
 #endif
 
-#ifdef USE_FAST_RAM
-    /* Load FAST_RAM variable intializers into DTCM RAM */
+#ifdef USE_CCM_CODE
+    /* Load functions into RAM */
+    extern uint8_t ccm_code_start;
+    extern uint8_t ccm_code_end;
+    extern uint8_t ccm_code;
+    memcpy(&ccm_code_start, &ccm_code, (size_t) (&ccm_code_end - &ccm_code_start));
+#endif
+
+#ifdef USE_FAST_DATA
+    /* Load FAST_DATA variable initializers into DTCM RAM */
     extern uint8_t _sfastram_data;
     extern uint8_t _efastram_data;
     extern uint8_t _sfastram_idata;
     memcpy(&_sfastram_data, &_sfastram_idata, (size_t) (&_efastram_data - &_sfastram_data));
 #endif
+
+#ifdef USE_RAM_CODE
+    /* Load slow-functions into ITCM RAM */
+    extern uint8_t ram_code_start;
+    extern uint8_t ram_code_end;
+    extern uint8_t ram_code;
+    memcpy(&ram_code_start, &ram_code, (size_t) (&ram_code_end - &ram_code_start));
+#endif
+
+}
+
+#ifdef STM32H7
+void initialiseD2MemorySections(void)
+{
+    /* Load DMA_DATA variable intializers into D2 RAM */
+    extern uint8_t _sdmaram_bss;
+    extern uint8_t _edmaram_bss;
+    extern uint8_t _sdmaram_data;
+    extern uint8_t _edmaram_data;
+    extern uint8_t _sdmaram_idata;
+    bzero(&_sdmaram_bss, (size_t) (&_edmaram_bss - &_sdmaram_bss));
+    memcpy(&_sdmaram_data, &_sdmaram_idata, (size_t) (&_edmaram_data - &_sdmaram_data));
+}
+#endif
+
+static void unusedPinInit(IO_t io)
+{
+    if (IOGetOwner(io) == OWNER_FREE) {
+        IOConfigGPIO(io, IOCFG_IPU);
+    }
+}
+
+void unusedPinsInit(void)
+{
+    IOTraversePins(unusedPinInit);
 }

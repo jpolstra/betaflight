@@ -24,6 +24,8 @@
 
 #include "common/time.h"
 
+#include "cms/cms_types.h"
+
 typedef enum {
     CMS_KEY_NONE,
     CMS_KEY_UP,
@@ -46,11 +48,13 @@ extern displayPort_t *pCurrentDisplay;
 void cmsInit(void);
 void cmsHandler(timeUs_t currentTimeUs);
 
-bool cmsDisplayPortSelect(displayPort_t *instance);
+bool cmsDisplayPortSelect(const displayPort_t *instance);
 void cmsMenuOpen(void);
-long cmsMenuChange(displayPort_t *pPort, const void *ptr);
-long cmsMenuExit(displayPort_t *pPort, const void *ptr);
+const void *cmsMenuChange(displayPort_t *pPort, const void *ptr);
+const void *cmsMenuExit(displayPort_t *pPort, const void *ptr);
 void cmsSetExternKey(cms_key_e extKey);
+void inhibitSaveMenu(void);
+void cmsAddMenuEntry(OSD_Entry *menuEntry, char *text, uint16_t flags, CMSEntryFuncPtr func, void *data);
 
 #define CMS_STARTUP_HELP_TEXT1 "MENU:THR MID"
 #define CMS_STARTUP_HELP_TEXT2     "+ YAW LEFT"

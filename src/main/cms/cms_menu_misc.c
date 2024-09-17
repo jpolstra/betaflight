@@ -22,47 +22,77 @@
 #include <stdint.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "platform.h"
 
 #ifdef USE_CMS
 
-#include "build/debug.h"
 #include "build/version.h"
-
-#include "drivers/time.h"
 
 #include "cms/cms.h"
 #include "cms/cms_types.h"
+#include "cms/cms_menu_gps_lap_timer.h"
 #include "cms/cms_menu_ledstrip.h"
 
 #include "common/utils.h"
 
+#include "config/config.h"
 #include "config/feature.h"
-#include "pg/pg.h"
-#include "pg/pg_ids.h"
-#include "pg/motor.h"
-#include "pg/rx.h"
 
-#include "fc/config.h"
+#include "drivers/time.h"
+
 #include "fc/rc_controls.h"
 
 #include "flight/mixer.h"
+
+#include "pg/motor.h"
+#include "pg/pg.h"
+#include "pg/pg_ids.h"
+#include "pg/rx.h"
 
 #include "rx/rx.h"
 
 #include "sensors/battery.h"
 
+#include "cms_menu_misc.h"
+
 //
 // Misc
 //
 
-static long cmsx_menuRcConfirmBack(const OSD_Entry *self)
+static const void *cmsx_menuRcOnEnter(displayPort_t *pDisp)
 {
-    if (self && self->type == OME_Back)
-        return 0;
-    else
-        return -1;
+    UNUSED(pDisp);
+
+    inhibitSaveMenu();
+
+    return NULL;
+}
+
+static const void *cmsx_menuRcConfirmBack(displayPort_t *pDisp, const OSD_Entry *self)
+{
+    UNUSED(pDisp);
+
+    if (self && ((self->flags & OSD_MENU_ELEMENT_MASK) == OME_Back)) {
+        return NULL;
+    } else {
+        return MENU_CHAIN_BACK;
+    }
+}
+
+static int16_t rcDataInt[AUX4 + 1];
+
+static const void *cmsx_menuRcOnDisplayUpdate(displayPort_t *pDisp, const OSD_Entry *selected)
+{
+    UNUSED(pDisp);
+    UNUSED(selected);
+
+    for (int i = 0; i <= AUX4; i++) {
+        rcDataInt[i] = lrintf(rcData[i]);
+    }
+
+    return NULL;
 }
 
 //
@@ -70,20 +100,20 @@ static long cmsx_menuRcConfirmBack(const OSD_Entry *self)
 //
 static const OSD_Entry cmsx_menuRcEntries[] =
 {
-    { "-- RC PREV --", OME_Label, NULL, NULL, 0},
+    { "-- RC PREV --", OME_Label, NULL, NULL},
 
-    { "ROLL",  OME_INT16, NULL, &(OSD_INT16_t){ &rcData[ROLL],     1, 2500, 0 }, DYNAMIC },
-    { "PITCH", OME_INT16, NULL, &(OSD_INT16_t){ &rcData[PITCH],    1, 2500, 0 }, DYNAMIC },
-    { "THR",   OME_INT16, NULL, &(OSD_INT16_t){ &rcData[THROTTLE], 1, 2500, 0 }, DYNAMIC },
-    { "YAW",   OME_INT16, NULL, &(OSD_INT16_t){ &rcData[YAW],      1, 2500, 0 }, DYNAMIC },
+    { "ROLL",  OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[ROLL],     1, 2500, 0 } },
+    { "PITCH", OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[PITCH],    1, 2500, 0 } },
+    { "THR",   OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[THROTTLE], 1, 2500, 0 } },
+    { "YAW",   OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[YAW],      1, 2500, 0 } },
 
-    { "AUX1",  OME_INT16, NULL, &(OSD_INT16_t){ &rcData[AUX1],     1, 2500, 0 }, DYNAMIC },
-    { "AUX2",  OME_INT16, NULL, &(OSD_INT16_t){ &rcData[AUX2],     1, 2500, 0 }, DYNAMIC },
-    { "AUX3",  OME_INT16, NULL, &(OSD_INT16_t){ &rcData[AUX3],     1, 2500, 0 }, DYNAMIC },
-    { "AUX4",  OME_INT16, NULL, &(OSD_INT16_t){ &rcData[AUX4],     1, 2500, 0 }, DYNAMIC },
+    { "AUX1",  OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[AUX1],     1, 2500, 0 } },
+    { "AUX2",  OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[AUX2],     1, 2500, 0 } },
+    { "AUX3",  OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[AUX3],     1, 2500, 0 } },
+    { "AUX4",  OME_INT16 | DYNAMIC, NULL, &(OSD_INT16_t){ &rcDataInt[AUX4],     1, 2500, 0 } },
 
-    { "BACK",  OME_Back, NULL, NULL, 0},
-    {NULL, OME_END, NULL, NULL, 0}
+    { "BACK",  OME_Back, NULL, NULL},
+    {NULL, OME_END, NULL, NULL}
 };
 
 CMS_Menu cmsx_menuRcPreview = {
@@ -91,50 +121,53 @@ CMS_Menu cmsx_menuRcPreview = {
     .GUARD_text = "XRCPREV",
     .GUARD_type = OME_MENU,
 #endif
-    .onEnter = NULL,
+    .onEnter = cmsx_menuRcOnEnter,
     .onExit = cmsx_menuRcConfirmBack,
+    .onDisplayUpdate = cmsx_menuRcOnDisplayUpdate,
     .entries = cmsx_menuRcEntries
 };
 
 static uint16_t motorConfig_minthrottle;
 static uint8_t motorConfig_digitalIdleOffsetValue;
 static uint8_t rxConfig_fpvCamAngleDegrees;
-static debugType_e systemConfig_debug_mode;
 
-static long cmsx_menuMiscOnEnter(void)
+static const void *cmsx_menuMiscOnEnter(displayPort_t *pDisp)
 {
+    UNUSED(pDisp);
+
     motorConfig_minthrottle = motorConfig()->minthrottle;
     motorConfig_digitalIdleOffsetValue = motorConfig()->digitalIdleOffsetValue / 10;
     rxConfig_fpvCamAngleDegrees = rxConfig()->fpvCamAngleDegrees;
-    systemConfig_debug_mode = systemConfig()->debug_mode;
 
-    return 0;
+    return NULL;
 }
 
-static long cmsx_menuMiscOnExit(const OSD_Entry *self)
+static const void *cmsx_menuMiscOnExit(displayPort_t *pDisp, const OSD_Entry *self)
 {
+    UNUSED(pDisp);
     UNUSED(self);
 
     motorConfigMutable()->minthrottle = motorConfig_minthrottle;
     motorConfigMutable()->digitalIdleOffsetValue = 10 * motorConfig_digitalIdleOffsetValue;
     rxConfigMutable()->fpvCamAngleDegrees = rxConfig_fpvCamAngleDegrees;
-    systemConfigMutable()->debug_mode = systemConfig_debug_mode;
 
-    return 0;
+    return NULL;
 }
 
 static const OSD_Entry menuMiscEntries[]=
 {
-    { "-- MISC --", OME_Label, NULL, NULL, 0 },
+    { "-- MISC --", OME_Label, NULL, NULL },
 
-    { "MIN THR",       OME_UINT16,  NULL,          &(OSD_UINT16_t){ &motorConfig_minthrottle,            1000, 2000, 1 }, REBOOT_REQUIRED },
-    { "DIGITAL IDLE",  OME_UINT8,   NULL,          &(OSD_UINT8_t) { &motorConfig_digitalIdleOffsetValue,    0,  200, 1 }, REBOOT_REQUIRED },
-    { "DEBUG MODE",    OME_TAB,     NULL,          &(OSD_TAB_t)   { &systemConfig_debug_mode, DEBUG_COUNT - 1, debugModeNames }, 0 },
-    { "FPV CAM ANGLE", OME_UINT8,   NULL,          &(OSD_UINT8_t) { &rxConfig_fpvCamAngleDegrees,           0,   90, 1 }, 0 },
-    { "RC PREV",       OME_Submenu, cmsMenuChange, &cmsx_menuRcPreview, 0},
+    { "MIN THR",       OME_UINT16 | REBOOT_REQUIRED,  NULL,          &(OSD_UINT16_t){ &motorConfig_minthrottle,            1000, 2000, 1 } },
+    { "DIGITAL IDLE",  OME_UINT8 | REBOOT_REQUIRED,   NULL,          &(OSD_UINT8_t) { &motorConfig_digitalIdleOffsetValue,    0,  200, 1 } },
+    { "FPV CAM ANGLE", OME_UINT8,   NULL,          &(OSD_UINT8_t) { &rxConfig_fpvCamAngleDegrees,           0,   90, 1 } },
+    { "RC PREV",       OME_Submenu, cmsMenuChange, &cmsx_menuRcPreview},
+#ifdef USE_GPS_LAP_TIMER
+    { "GPS LAP TIMER", OME_Submenu, cmsMenuChange, &cms_menuGpsLapTimer },
+#endif // USE_GPS_LAP_TIMER
 
-    { "BACK", OME_Back, NULL, NULL, 0},
-    { NULL, OME_END, NULL, NULL, 0}
+    { "BACK", OME_Back, NULL, NULL},
+    { NULL, OME_END, NULL, NULL}
 };
 
 CMS_Menu cmsx_menuMisc = {
@@ -144,6 +177,7 @@ CMS_Menu cmsx_menuMisc = {
 #endif
     .onEnter = cmsx_menuMiscOnEnter,
     .onExit = cmsx_menuMiscOnExit,
+    .onDisplayUpdate = NULL,
     .entries = menuMiscEntries
 };
 

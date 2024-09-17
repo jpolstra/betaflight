@@ -18,8 +18,10 @@
  * If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "platform.h"
@@ -29,46 +31,44 @@
 #include "build/version.h"
 
 #include "cms/cms.h"
-#include "io/displayport_srxl.h"
 
 #include "common/crc.h"
 #include "common/streambuf.h"
 #include "common/utils.h"
 
+#include "config/config.h"
 #include "config/feature.h"
 
-#include "io/gps.h"
-#include "io/serial.h"
+#include "drivers/dshot.h"
+#include "drivers/vtx_common.h"
 
-#include "fc/config.h"
 #include "fc/rc_controls.h"
 #include "fc/runtime_config.h"
 
 #include "flight/imu.h"
 #include "flight/mixer.h"
 
+#include "io/displayport_srxl.h"
 #include "io/gps.h"
+#include "io/serial.h"
+#include "io/vtx_smartaudio.h"
+#include "io/vtx_tramp.h"
 
 #include "pg/rx.h"
 #include "pg/motor.h"
 
 #include "rx/rx.h"
 #include "rx/spektrum.h"
-#include "rx/srxl2.h"
 #include "io/spektrum_vtx_control.h"
+#include "rx/srxl2.h"
 
-#include "sensors/battery.h"
 #include "sensors/adcinternal.h"
+#include "sensors/battery.h"
 #include "sensors/esc_sensor.h"
 
 #include "telemetry/telemetry.h"
-#include "telemetry/srxl.h"
 
-#include "drivers/vtx_common.h"
-#include "drivers/dshot.h"
-
-#include "io/vtx_tramp.h"
-#include "io/vtx_smartaudio.h"
+#include "srxl.h"
 
 #define SRXL_ADDRESS_FIRST          0xA5
 #define SRXL_ADDRESS_SECOND         0x80
@@ -166,11 +166,13 @@ typedef struct
     INT8 dBm_A, // Average signal for A antenna in dBm
     INT8 dBm_B; // Average signal for B antenna in dBm.
     // If only 1 antenna, set B = A
+    UINT16 spare[2];
+    UINT16 fastbootUptime; // bit 15 = fastboot flag.  Bits 0-14= uptime in seconds.  0x0000 --> no data
 } STRU_TELE_RPM;
 */
 
 #define STRU_TELE_RPM_EMPTY_FIELDS_COUNT 8
-#define STRU_TELE_RPM_EMPTY_FIELDS_VALUE 0xff
+#define STRU_TELE_RPM_EMPTY_FIELDS_VALUE 0x00
 
 #define SPEKTRUM_RPM_UNUSED 0xffff
 #define SPEKTRUM_TEMP_UNUSED 0x7fff
@@ -195,16 +197,9 @@ uint16_t getMotorAveragePeriod(void)
 #endif
 
 #if defined(USE_DSHOT_TELEMETRY)
-    if (useDshotTelemetry) {
-        uint16_t motors = getMotorCount();
-
-        if (motors > 0) {
-            for (int motor = 0; motor < motors; motor++) {
-                rpm += getDshotTelemetry(motor);
-            }
-            rpm = 100.0f / (motorConfig()->motorPoleCount / 2.0f) * rpm;  // convert erpm freq to RPM.
-            rpm /= motors;           // Average combined rpm
-        }
+    // Calculate this way when no rpm from esc data
+    if (useDshotTelemetry && rpm == 0) {
+        rpm = lrintf(getDshotRpmAverage());
     }
 #endif
 
@@ -251,7 +246,7 @@ bool srxlFrameRpm(sbuf_t *dst, timeUs_t currentTimeUs)
 static void GPStoDDDMM_MMMM(int32_t mwiigps, gpsCoordinateDDDMMmmmm_t *result)
 {
     int32_t absgps, deg, min;
-    absgps = ABS(mwiigps);
+    absgps = abs(mwiigps);
     deg = absgps / GPS_DEGREES_DIVIDER;
     absgps = (absgps - deg * GPS_DEGREES_DIVIDER) * 60;     // absgps = Minutes left * 10^7
     min = absgps / GPS_DEGREES_DIVIDER;                     // minutes left
@@ -282,7 +277,7 @@ typedef struct
     UINT32   latitude;      // BCD, format 4.4, Degrees * 100 + minutes, less than 100 degrees
     UINT32   longitude;     // BCD, format 4.4 , Degrees * 100 + minutes, flag indicates > 99 degrees
     UINT16   course;        // BCD, 3.1
-    UINT8    HDOP;          // BCD, format 1.1
+    UINT8    PDOP;          // BCD, format 1.1
     UINT8    GPSflags;      // see definitions below
 } STRU_TELE_GPS_LOC;
 */
@@ -301,10 +296,10 @@ bool srxlFrameGpsLoc(sbuf_t *dst, timeUs_t currentTimeUs)
     UNUSED(currentTimeUs);
     gpsCoordinateDDDMMmmmm_t coordinate;
     uint32_t latitudeBcd, longitudeBcd, altitudeLo;
-    uint16_t altitudeLoBcd, groundCourseBcd, hdop;
-    uint8_t hdopBcd, gpsFlags;
+    uint16_t altitudeLoBcd, groundCourseBcd, pdop;
+    uint8_t pdopBcd, gpsFlags;
 
-    if (!featureIsEnabled(FEATURE_GPS) || !STATE(GPS_FIX) || gpsSol.numSat < 6) {
+    if (!featureIsEnabled(FEATURE_GPS) || !STATE(GPS_FIX) || gpsSol.numSat < GPS_MIN_SAT_COUNT) {
         return false;
     }
 
@@ -317,16 +312,16 @@ bool srxlFrameGpsLoc(sbuf_t *dst, timeUs_t currentTimeUs)
     longitudeBcd = (dec2bcd(coordinate.dddmm) << 16) | dec2bcd(coordinate.mmmm);
 
     // altitude (low order)
-    altitudeLo = ABS(gpsSol.llh.altCm) / 10;
+    altitudeLo = abs(gpsSol.llh.altCm) / 10;
     altitudeLoBcd = dec2bcd(altitudeLo % 100000);
 
     // Ground course
     groundCourseBcd = dec2bcd(gpsSol.groundCourse);
 
-    // HDOP
-    hdop = gpsSol.hdop / 10;
-    hdop = (hdop > 99) ? 99 : hdop;
-    hdopBcd = dec2bcd(hdop);
+    // PDOP
+    pdop = gpsSol.dop.pdop / 10;
+    pdop = (pdop > 99) ? 99 : pdop;
+    pdopBcd = dec2bcd(pdop);
 
     // flags
     gpsFlags = GPS_FLAGS_GPS_DATA_RECEIVED_BIT | GPS_FLAGS_GPS_FIX_VALID_BIT | GPS_FLAGS_3D_FIX_BIT;
@@ -342,7 +337,7 @@ bool srxlFrameGpsLoc(sbuf_t *dst, timeUs_t currentTimeUs)
     sbufWriteU32(dst, latitudeBcd);
     sbufWriteU32(dst, longitudeBcd);
     sbufWriteU16(dst, groundCourseBcd);
-    sbufWriteU8(dst, hdopBcd);
+    sbufWriteU8(dst, pdopBcd);
     sbufWriteU8(dst, gpsFlags);
 
     return true;
@@ -372,7 +367,7 @@ bool srxlFrameGpsStat(sbuf_t *dst, timeUs_t currentTimeUs)
     uint8_t numSatBcd, altitudeHighBcd;
     bool timeProvided = false;
 
-    if (!featureIsEnabled(FEATURE_GPS) || !STATE(GPS_FIX) || gpsSol.numSat < 6) {
+    if (!featureIsEnabled(FEATURE_GPS) || !STATE(GPS_FIX) || gpsSol.numSat < GPS_MIN_SAT_COUNT) {
         return false;
     }
 
@@ -470,7 +465,7 @@ bool srxlFrameFlightPackCurrent(sbuf_t *dst, timeUs_t currentTimeUs)
     return false;
 }
 
-#if defined (USE_SPEKTRUM_CMS_TELEMETRY) && defined (USE_CMS)
+#if defined(USE_SPEKTRUM_CMS_TELEMETRY) && defined(USE_CMS)
 
 // Betaflight CMS using Spektrum Tx telemetry TEXT_GEN sensor as display.
 
@@ -630,15 +625,15 @@ static void convertVtxTmData(spektrumVtx_t * vtx)
 /*
 typedef struct
 {
-    UINT8		identifier;
-    UINT8		sID;	  // Secondary ID
-    UINT8		band;	  // VTX Band (0 = Fatshark, 1 = Raceband, 2 = E, 3 = B, 4 = A, 5-7 = Reserved)
-    UINT8		channel;  // VTX Channel (0-7)
-    UINT8		pit;	  // Pit/Race mode (0 = Race, 1 = Pit). Race = (normal operating) mode. Pit = (reduced power) mode. When PIT is set, it overrides all other power settings
-    UINT8		power;	  // VTX Power (0 = Off, 1 = 1mw to 14mW, 2 = 15mW to 25mW, 3 = 26mW to 99mW, 4 = 100mW to 299mW, 5 = 300mW to 600mW, 6 = 601mW+, 7 = manual control)
-    UINT16		powerDec; // VTX Power as a decimal 1mw/unit
-    UINT8		region;	  // Region (0 = USA, 1 = EU, 0xFF = N/A)
-    UINT8		rfu[7];	  // reserved
+    UINT8       identifier;
+    UINT8       sID;      // Secondary ID
+    UINT8       band;     // VTX Band (0 = Fatshark, 1 = Raceband, 2 = E, 3 = B, 4 = A, 5-7 = Reserved)
+    UINT8       channel;  // VTX Channel (0-7)
+    UINT8       pit;      // Pit/Race mode (0 = Race, 1 = Pit). Race = (normal operating) mode. Pit = (reduced power) mode. When PIT is set, it overrides all other power settings
+    UINT8       power;    // VTX Power (0 = Off, 1 = 1mw to 14mW, 2 = 15mW to 25mW, 3 = 26mW to 99mW, 4 = 100mW to 299mW, 5 = 300mW to 600mW, 6 = 601mW+, 7 = manual control)
+    UINT16      powerDec; // VTX Power as a decimal 1mw/unit
+    UINT8       region;   // Region (0 = USA, 1 = EU, 0xFF = N/A)
+    UINT8       rfu[7];   // reserved
 } STRU_TELE_VTX;
 */
 
@@ -699,7 +694,7 @@ static bool srxlFrameVTX(sbuf_t *dst, timeUs_t currentTimeUs)
 #define SRXL_GPS_STAT_COUNT 0
 #endif
 
-#if defined (USE_SPEKTRUM_CMS_TELEMETRY) && defined (USE_CMS)
+#if defined(USE_SPEKTRUM_CMS_TELEMETRY) && defined(USE_CMS)
 #define SRXL_SCHEDULE_CMS_COUNT  1
 #else
 #define SRXL_SCHEDULE_CMS_COUNT  0
@@ -729,7 +724,7 @@ const srxlScheduleFnPtr srxlScheduleFuncs[SRXL_TOTAL_COUNT] = {
 #if defined(USE_SPEKTRUM_VTX_TELEMETRY) && defined(USE_SPEKTRUM_VTX_CONTROL) && defined(USE_VTX_COMMON)
     srxlFrameVTX,
 #endif
-#if defined (USE_SPEKTRUM_CMS_TELEMETRY) && defined (USE_CMS)
+#if defined(USE_SPEKTRUM_CMS_TELEMETRY) && defined(USE_CMS)
     srxlFrameText,
 #endif
 };
@@ -750,7 +745,7 @@ static void processSrxl(timeUs_t currentTimeUs)
         srxlFnPtr = srxlScheduleFuncs[srxlScheduleIndex + srxlScheduleUserIndex];
         srxlScheduleUserIndex = (srxlScheduleUserIndex + 1) % SRXL_SCHEDULE_USER_COUNT;
 
-#if defined (USE_SPEKTRUM_CMS_TELEMETRY) && defined (USE_CMS)
+#if defined(USE_SPEKTRUM_CMS_TELEMETRY) && defined(USE_CMS)
         // Boost CMS performance by sending nothing else but CMS Text frames when in a CMS menu.
         // Sideeffect, all other reports are still not sent if user leaves CMS without a proper EXIT.
         if (cmsInMenu &&
@@ -774,18 +769,24 @@ void initSrxlTelemetry(void)
 {
     // check if there is a serial port open for SRXL telemetry (ie opened by the SRXL RX)
     // and feature is enabled, if so, set SRXL telemetry enabled
-  if (srxlRxIsActive()) {
-    srxlTelemetryEnabled = true;
-    srxl2 = false; 
+    if (srxlRxIsActive()) {
+        srxlTelemetryEnabled = true;
+        srxl2 = false;
 #if defined(USE_SERIALRX_SRXL2)
-  } else if (srxl2RxIsActive()) {
-    srxlTelemetryEnabled = true;
-    srxl2 = true;
+    } else if (srxl2RxIsActive()) {
+        srxlTelemetryEnabled = true;
+        srxl2 = true;
 #endif
-  } else {
-    srxlTelemetryEnabled = false;
-    srxl2 = false;
-  }
+    } else {
+        srxlTelemetryEnabled = false;
+        srxl2 = false;
+    }
+
+#if defined(USE_SPEKTRUM_CMS_TELEMETRY)
+    if (srxlTelemetryEnabled) {
+        srxlDisplayportRegister();
+    }
+#endif
  }
 
 bool checkSrxlTelemetryState(void)

@@ -150,14 +150,14 @@ STATIC_UNIT_TESTED bool symaCheckBindPacket(const uint8_t *packet)
 STATIC_UNIT_TESTED uint16_t symaConvertToPwmUnsigned(uint8_t val)
 {
     uint32_t ret = val;
-    ret = ret * (PWM_RANGE_MAX - PWM_RANGE_MIN) / UINT8_MAX + PWM_RANGE_MIN;
+    ret = ret * PWM_RANGE / UINT8_MAX + PWM_RANGE_MIN;
     return (uint16_t)ret;
 }
 
 STATIC_UNIT_TESTED uint16_t symaConvertToPwmSigned(uint8_t val)
 {
     int32_t ret = val & 0x7f;
-    ret = (ret * (PWM_RANGE_MAX - PWM_RANGE_MIN)) / (2 * INT8_MAX);
+    ret = ret * PWM_RANGE / (2 * INT8_MAX);
     if (val & 0x80) {// sign bit set
         ret = -ret;
     }
@@ -274,7 +274,7 @@ rx_spi_received_e symaNrf24DataReceived(uint8_t *payload)
 static void symaNrf24Setup(rx_spi_protocol_e protocol)
 {
     symaProtocol = protocol;
-    NRF24L01_Initialize(BV(NRF24L01_00_CONFIG_EN_CRC) | BV( NRF24L01_00_CONFIG_CRCO)); // sets PWR_UP, EN_CRC, CRCO - 2 byte CRC
+    NRF24L01_Initialize(BIT(NRF24L01_00_CONFIG_EN_CRC) | BIT( NRF24L01_00_CONFIG_CRCO)); // sets PWR_UP, EN_CRC, CRCO - 2 byte CRC
     NRF24L01_SetupBasic();
 
     if (symaProtocol == RX_SPI_NRF24_SYMA_X) {
@@ -299,9 +299,11 @@ static void symaNrf24Setup(rx_spi_protocol_e protocol)
     NRF24L01_SetRxMode(); // enter receive mode to start listening for packets
 }
 
-bool symaNrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool symaNrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState, rxSpiExtiConfig_t *extiConfig)
 {
-    rxRuntimeConfig->channelCount = RC_CHANNEL_COUNT;
+    UNUSED(extiConfig);
+
+    rxRuntimeState->channelCount = RC_CHANNEL_COUNT;
     symaNrf24Setup((rx_spi_protocol_e)rxSpiConfig->rx_spi_protocol);
 
     return true;

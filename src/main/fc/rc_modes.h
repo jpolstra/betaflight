@@ -33,6 +33,7 @@ typedef enum {
     BOXANGLE,
     BOXHORIZON,
     BOXMAG,
+    BOXALTHOLD,
     BOXHEADFREE,
     BOXPASSTHRU,
     BOXFAILSAFE,
@@ -74,6 +75,11 @@ typedef enum {
     BOXACROTRAINER,
     BOXVTXCONTROLDISABLE,
     BOXLAUNCHCONTROL,
+    BOXMSPOVERRIDE,
+    BOXSTICKCOMMANDDISABLE,
+    BOXBEEPERMUTE,
+    BOXREADY,
+    BOXLAPTIMERRESET,
     CHECKBOX_ITEM_COUNT
 } boxId_e;
 
@@ -115,6 +121,18 @@ typedef struct modeActivationCondition_s {
 
 PG_DECLARE_ARRAY(modeActivationCondition_t, MAX_MODE_ACTIVATION_CONDITION_COUNT, modeActivationConditions);
 
+#if defined(USE_CUSTOM_BOX_NAMES)
+
+#define MAX_BOX_USER_NAME_LENGTH 16
+#define BOX_USER_NAME_COUNT      4
+STATIC_ASSERT(BOXUSER4 + 1 - BOXUSER1 == BOX_USER_NAME_COUNT, "Invalid BOX_USER_NAME_COUNT");
+typedef struct modeActivationConfig_s {
+    char box_user_names[BOX_USER_NAME_COUNT][MAX_BOX_USER_NAME_LENGTH];
+} modeActivationConfig_t;
+
+PG_DECLARE(modeActivationConfig_t, modeActivationConfig);
+#endif
+
 typedef struct modeActivationProfile_s {
     modeActivationCondition_t modeActivationConditions[MAX_MODE_ACTIVATION_CONDITION_COUNT];
 } modeActivationProfile_t;
@@ -122,7 +140,7 @@ typedef struct modeActivationProfile_s {
 #define IS_RANGE_USABLE(range) ((range)->startStep < (range)->endStep)
 
 bool IS_RC_MODE_ACTIVE(boxId_e boxId);
-void rcModeUpdate(boxBitmask_t *newState);
+void rcModeUpdate(const boxBitmask_t *newState);
 
 bool airmodeIsEnabled(void);
 

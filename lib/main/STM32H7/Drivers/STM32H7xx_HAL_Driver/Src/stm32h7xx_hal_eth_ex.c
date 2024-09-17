@@ -25,12 +25,15 @@
   * @{
   */
 
+#ifdef HAL_ETH_MODULE_ENABLED
+
+#if defined(ETH)
+
 /** @defgroup ETHEx ETHEx
   * @brief ETH HAL Extended module driver
   * @{
   */
 
-#ifdef HAL_ETH_MODULE_ENABLED
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private define ------------------------------------------------------------*/
@@ -407,7 +410,7 @@ HAL_StatusTypeDef HAL_ETHEx_GetTxVLANConfig(ETH_HandleTypeDef *heth, uint32_t VL
     pVlanConfig->VLANTagControl = READ_BIT(heth->Instance->MACVIR, (ETH_MACVIR_VLP | ETH_MACVIR_VLC));
   }
 
-  return HAL_OK;;
+  return HAL_OK;
 }
 
 /**
@@ -541,10 +544,13 @@ uint32_t HAL_ETHEx_GetMACLPIEvent(ETH_HandleTypeDef *heth)
   * @}
   */
 
-#endif /* HAL_ETH_MODULE_ENABLED */
 /**
   * @}
   */
+
+#endif /* ETH */
+
+#endif /* HAL_ETH_MODULE_ENABLED */
 
 /**
   * @}

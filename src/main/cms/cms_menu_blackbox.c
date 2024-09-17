@@ -31,6 +31,7 @@
 
 #if defined(USE_CMS) && defined(USE_BLACKBOX)
 
+#include "build/debug.h"
 #include "build/version.h"
 
 #include "blackbox/blackbox.h"
@@ -42,37 +43,52 @@
 
 #include "common/printf.h"
 #include "common/utils.h"
+#include "common/time.h"
 
 #include "config/feature.h"
 
-#include "drivers/flash.h"
+#include "drivers/flash/flash.h"
 #include "drivers/time.h"
 #include "drivers/sdcard.h"
+#include "drivers/usb_msc.h"
 
-#include "fc/config.h"
+#include "config/config.h"
 
 #include "io/asyncfatfs/asyncfatfs.h"
 #include "io/flashfs.h"
 #include "io/beeper.h"
+#include "io/usb_msc.h"
 
 #include "pg/pg.h"
 
+#include "flight/pid.h"
+
 static const char * const cmsx_BlackboxDeviceNames[] = {
     "NONE",
-    "FLASH ",
+    "FLASH",
     "SDCARD",
     "SERIAL"
 };
 
-static uint16_t blackboxConfig_p_ratio;
+static const char * const cmsx_BlackboxRateNames[] = {
+    "1/1",
+    "1/2",
+    "1/4",
+    "1/8",
+    "1/16"
+};
 
 static uint8_t cmsx_BlackboxDevice;
-static OSD_TAB_t cmsx_BlackboxDeviceTable = { &cmsx_BlackboxDevice, 2, cmsx_BlackboxDeviceNames };
+static OSD_TAB_t cmsx_BlackboxDeviceTable = { &cmsx_BlackboxDevice, 3, cmsx_BlackboxDeviceNames };
+static uint8_t cmsx_BlackboxRate;
+static OSD_TAB_t cmsx_BlackboxRateTable = { &cmsx_BlackboxRate, 4, cmsx_BlackboxRateNames };
+static debugType_e systemConfig_debug_mode;
 
 #define CMS_BLACKBOX_STRING_LENGTH 8
 static char cmsx_BlackboxStatus[CMS_BLACKBOX_STRING_LENGTH];
 static char cmsx_BlackboxDeviceStorageUsed[CMS_BLACKBOX_STRING_LENGTH];
 static char cmsx_BlackboxDeviceStorageFree[CMS_BLACKBOX_STRING_LENGTH];
+static char cmsx_pidFreq[CMS_BLACKBOX_STRING_LENGTH];
 
 static void cmsx_Blackbox_GetDeviceStatus(void)
 {
@@ -148,70 +164,159 @@ static void cmsx_Blackbox_GetDeviceStatus(void)
 }
 
 #ifdef USE_FLASHFS
-static long cmsx_EraseFlash(displayPort_t *pDisplay, const void *ptr)
+static const void *cmsx_EraseFlash(displayPort_t *pDisplay, const void *ptr)
 {
     UNUSED(ptr);
 
     if (!flashfsIsSupported()) {
-        return 0;
+        return NULL;
     }
 
-    displayClearScreen(pDisplay);
-    displayWrite(pDisplay, 5, 3, "ERASING FLASH...");
-    displayResync(pDisplay); // Was max7456RefreshAll(); Why at this timing?
+    displayClearScreen(pDisplay, DISPLAY_CLEAR_WAIT);
+    displayWrite(pDisplay, 5, 3, DISPLAYPORT_SEVERITY_INFO, "ERASING FLASH...");
+    displayRedraw(pDisplay);
 
     flashfsEraseCompletely();
     while (!flashfsIsReady()) {
+        //TODO: Make this non-blocking!
         delay(100);
     }
 
     beeper(BEEPER_BLACKBOX_ERASE);
-    displayClearScreen(pDisplay);
-    displayResync(pDisplay); // Was max7456RefreshAll(); wedges during heavy SPI?
+    displayClearScreen(pDisplay, DISPLAY_CLEAR_WAIT);
+    displayRedraw(pDisplay);
 
     // Update storage device status to show new used space amount
     cmsx_Blackbox_GetDeviceStatus();
 
-    return 0;
+    return MENU_CHAIN_BACK;
 }
 #endif // USE_FLASHFS
 
-static long cmsx_Blackbox_onEnter(void)
+#ifdef USE_USB_MSC
+static const void *cmsx_StorageDevice(displayPort_t *pDisplay, const void *ptr)
 {
+    UNUSED(ptr);
+
+    if (mscCheckFilesystemReady()) {
+      displayClearScreen(pDisplay, DISPLAY_CLEAR_WAIT);
+      displayWrite(pDisplay, 2, 4, DISPLAYPORT_SEVERITY_INFO, "USB MASS STORAGE MODE IS ON");
+      displayWrite(pDisplay, 4, 5, DISPLAYPORT_SEVERITY_INFO, "CONNECT YOUR GADGET");
+      displayRedraw(pDisplay);
+#ifdef USE_RTC_TIME
+      int timezoneOffsetMinutes = timeConfig()->tz_offsetMinutes;
+#else
+      int timezoneOffsetMinutes = 0;
+#endif
+      beeper(BEEPER_USB);
+      systemResetToMsc(timezoneOffsetMinutes);
+      return NULL;
+    } else {
+      displayWrite(pDisplay, 5, 3, DISPLAYPORT_SEVERITY_INFO, "STORAGE NOT PRESENT OR FAILED TO INITIALIZE!");
+      displayRedraw(pDisplay);
+      beeper(BEEPER_USB);
+      return MENU_CHAIN_BACK;
+    }
+}
+#endif //USE_USB_MSC
+
+
+static const void *cmsx_Blackbox_onEnter(displayPort_t *pDisp)
+{
+    UNUSED(pDisp);
+
     cmsx_Blackbox_GetDeviceStatus();
     cmsx_BlackboxDevice = blackboxConfig()->device;
+    cmsx_BlackboxRate = blackboxConfig()->sample_rate;
+    systemConfig_debug_mode = systemConfig()->debug_mode;
 
-    blackboxConfig_p_ratio = blackboxConfig()->p_ratio;
-    return 0;
+    const uint16_t pidFreq = (uint16_t)pidGetPidFrequency();
+    if (pidFreq > 1000) {
+        tfp_sprintf(cmsx_pidFreq, "%1d.%02dKHZ", (pidFreq / 10) / 100, (pidFreq / 10) % 100);
+    } else {
+        tfp_sprintf(cmsx_pidFreq, "%3dHZ", pidFreq);
+    }
+    return NULL;
 }
 
-static long cmsx_Blackbox_onExit(const OSD_Entry *self)
+static const void *cmsx_Blackbox_onExit(displayPort_t *pDisp, const OSD_Entry *self)
 {
+    UNUSED(pDisp);
     UNUSED(self);
 
     if (blackboxMayEditConfig()) {
         blackboxConfigMutable()->device = cmsx_BlackboxDevice;
         blackboxValidateConfig();
     }
-    blackboxConfigMutable()->p_ratio = blackboxConfig_p_ratio;
-    return 0;
+    blackboxConfigMutable()->sample_rate = cmsx_BlackboxRate;
+    systemConfigMutable()->debug_mode = systemConfig_debug_mode;
+
+    return NULL;
 }
+
+// Check before erase flash
+#ifdef USE_FLASHFS
+static const OSD_Entry menuEraseFlashCheckEntries[] = {
+    { "CONFIRM ERASE", OME_Label, NULL, NULL},
+    { "NO",            OME_Back, NULL, NULL },
+
+    { "YES",           OME_Funcall, cmsx_EraseFlash, NULL },
+    { NULL,            OME_END, NULL, NULL }
+};
+
+static CMS_Menu cmsx_menuEraseFlashCheck = {
+#ifdef CMS_MENU_DEBUG
+    .GUARD_text = "MENUERASEFLASH",
+    .GUARD_type = OME_MENU,
+#endif
+    .onEnter = NULL,
+    .onExit = NULL,
+    .onDisplayUpdate = NULL,
+    .entries = menuEraseFlashCheckEntries
+};
+#endif //USE_FLASHFS
+
+#ifdef USE_USB_MSC
+static const OSD_Entry menuStorageDeviceCheckEntries[] = {
+    { "CONFIRM USB MASS STORAGE", OME_Label, NULL, NULL},
+    { "NO",            OME_Back, NULL, NULL },
+
+    { "YES",           OME_Funcall, cmsx_StorageDevice, NULL },
+    { NULL,            OME_END, NULL, NULL }
+};
+
+static CMS_Menu cmsx_menuStorageDeviceCheck = {
+#ifdef CMS_MENU_DEBUG
+    .GUARD_text = "STORAGEDEVICE",
+    .GUARD_type = OME_MENU,
+#endif
+    .onEnter = NULL,
+    .onExit = NULL,
+    .onDisplayUpdate = NULL,
+    .entries = menuStorageDeviceCheckEntries
+};
+#endif //USE_USB_MSC
 
 static const OSD_Entry cmsx_menuBlackboxEntries[] =
 {
-    { "-- BLACKBOX --", OME_Label, NULL, NULL, 0},
-    { "DEVICE",      OME_TAB,     NULL,            &cmsx_BlackboxDeviceTable,                                 REBOOT_REQUIRED },
-    { "(STATUS)",    OME_String,  NULL,            &cmsx_BlackboxStatus,                                      0 },
-    { "(USED)",      OME_String,  NULL,            &cmsx_BlackboxDeviceStorageUsed,                           0 },
-    { "(FREE)",      OME_String,  NULL,            &cmsx_BlackboxDeviceStorageFree,                           0 },
-    { "P RATIO",     OME_UINT16,  NULL,            &(OSD_UINT16_t){ &blackboxConfig_p_ratio, 1, INT16_MAX, 1 }, REBOOT_REQUIRED },
+    { "-- BLACKBOX --", OME_Label, NULL, NULL},
+    { "(PID FREQ)",  OME_String,  NULL,            &cmsx_pidFreq },
+    { "SAMPLERATE",  OME_TAB | REBOOT_REQUIRED,     NULL,            &cmsx_BlackboxRateTable },
+    { "DEVICE",      OME_TAB | REBOOT_REQUIRED,     NULL,            &cmsx_BlackboxDeviceTable },
+    { "(STATUS)",    OME_String,  NULL,            &cmsx_BlackboxStatus },
+    { "(USED)",      OME_String,  NULL,            &cmsx_BlackboxDeviceStorageUsed },
+    { "(FREE)",      OME_String,  NULL,            &cmsx_BlackboxDeviceStorageFree },
+    { "DEBUG MODE",  OME_TAB | REBOOT_REQUIRED,     NULL,            &(OSD_TAB_t)   { &systemConfig_debug_mode, DEBUG_COUNT - 1, debugModeNames } },
 
+#ifdef USE_USB_MSC
+    { "USB MASS STORAGE", OME_Submenu, cmsMenuChange, &cmsx_menuStorageDeviceCheck },
+#endif // USE_USB_MSC
 #ifdef USE_FLASHFS
-    { "ERASE FLASH", OME_Funcall, cmsx_EraseFlash, NULL,                                                      0 },
+    { "ERASE FLASH", OME_Submenu, cmsMenuChange,   &cmsx_menuEraseFlashCheck },
 #endif // USE_FLASHFS
 
-    { "BACK", OME_Back, NULL, NULL, 0 },
-    { NULL, OME_END, NULL, NULL, 0 }
+    { "BACK", OME_Back, NULL, NULL },
+    { NULL, OME_END, NULL, NULL}
 };
 
 CMS_Menu cmsx_menuBlackbox = {
@@ -221,6 +326,7 @@ CMS_Menu cmsx_menuBlackbox = {
 #endif
     .onEnter = cmsx_Blackbox_onEnter,
     .onExit = cmsx_Blackbox_onExit,
+    .onDisplayUpdate = NULL,
     .entries = cmsx_menuBlackboxEntries
 };
 

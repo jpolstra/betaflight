@@ -30,14 +30,14 @@
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
 
-#include "fc/config.h"
+#include "config/config.h"
 #include "fc/controlrate_profile.h"
 #include "fc/rc.h"
 #include "fc/rc_controls.h"
 
 controlRateConfig_t *currentControlRateProfile;
 
-PG_REGISTER_ARRAY_WITH_RESET_FN(controlRateConfig_t, CONTROL_RATE_PROFILE_COUNT, controlRateProfiles, PG_CONTROL_RATE_PROFILES, 2);
+PG_REGISTER_ARRAY_WITH_RESET_FN(controlRateConfig_t, CONTROL_RATE_PROFILE_COUNT, controlRateProfiles, PG_CONTROL_RATE_PROFILES, 6);
 
 void pgResetFn_controlRateProfiles(controlRateConfig_t *controlRateConfig)
 {
@@ -45,28 +45,34 @@ void pgResetFn_controlRateProfiles(controlRateConfig_t *controlRateConfig)
         RESET_CONFIG(controlRateConfig_t, &controlRateConfig[i],
             .thrMid8 = 50,
             .thrExpo8 = 0,
-            .dynThrPID = 65,
-            .tpa_breakpoint = 1250,
-            .rates_type = RATES_TYPE_BETAFLIGHT,
-            .rcRates[FD_ROLL] = 100,
-            .rcRates[FD_PITCH] = 100,
-            .rcRates[FD_YAW] = 100,
+            .rates_type = RATES_TYPE_ACTUAL,
+            .rcRates[FD_ROLL] = 7,
+            .rcRates[FD_PITCH] = 7,
+            .rcRates[FD_YAW] = 7,
             .rcExpo[FD_ROLL] = 0,
             .rcExpo[FD_PITCH] = 0,
             .rcExpo[FD_YAW] = 0,
-            .rates[FD_ROLL] = 70,
-            .rates[FD_PITCH] = 70,
-            .rates[FD_YAW] = 70,
+            .rates[FD_ROLL] = 67,
+            .rates[FD_PITCH] = 67,
+            .rates[FD_YAW] = 67,
             .throttle_limit_type = THROTTLE_LIMIT_TYPE_OFF,
             .throttle_limit_percent = 100,
             .rate_limit[FD_ROLL] = CONTROL_RATE_CONFIG_RATE_LIMIT_MAX,
             .rate_limit[FD_PITCH] = CONTROL_RATE_CONFIG_RATE_LIMIT_MAX,
             .rate_limit[FD_YAW] = CONTROL_RATE_CONFIG_RATE_LIMIT_MAX,
-            .tpaMode = TPA_MODE_D,
             .profileName = { 0 },
+            .quickRatesRcExpo = 0,
         );
     }
 }
+
+const ratesSettingsLimits_t ratesSettingLimits[RATES_TYPE_COUNT] = {
+    [RATES_TYPE_BETAFLIGHT] = { 255, 100, 100 },
+    [RATES_TYPE_RACEFLIGHT] = { 200, 255, 100 },
+    [RATES_TYPE_KISS]       = { 255,  99, 100 },
+    [RATES_TYPE_ACTUAL]     = { 200, 200, 100 },
+    [RATES_TYPE_QUICK]      = { 255, 200, 100 },
+};
 
 void loadControlRateProfile(void)
 {
@@ -83,10 +89,11 @@ void changeControlRateProfile(uint8_t controlRateProfileIndex)
     initRcProcessing();
 }
 
-void copyControlRateProfile(const uint8_t dstControlRateProfileIndex, const uint8_t srcControlRateProfileIndex) {
+void copyControlRateProfile(const uint8_t dstControlRateProfileIndex, const uint8_t srcControlRateProfileIndex)
+{
     if ((dstControlRateProfileIndex < CONTROL_RATE_PROFILE_COUNT && srcControlRateProfileIndex < CONTROL_RATE_PROFILE_COUNT)
         && dstControlRateProfileIndex != srcControlRateProfileIndex
     ) {
-        memcpy(controlRateProfilesMutable(dstControlRateProfileIndex), controlRateProfilesMutable(srcControlRateProfileIndex), sizeof(controlRateConfig_t));
+        memcpy(controlRateProfilesMutable(dstControlRateProfileIndex), controlRateProfiles(srcControlRateProfileIndex), sizeof(controlRateConfig_t));
     }
 }

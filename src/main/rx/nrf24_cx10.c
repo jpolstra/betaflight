@@ -234,7 +234,7 @@ rx_spi_received_e cx10Nrf24DataReceived(uint8_t *payload)
         NRF24L01_SetTxMode();// enter transmit mode to send the packet
         // wait for the ACK packet to send before changing channel
         static const int fifoDelayUs = 100;
-        while (!(NRF24L01_ReadReg(NRF24L01_17_FIFO_STATUS) & BV(NRF24L01_17_FIFO_STATUS_TX_EMPTY))) {
+        while (!(NRF24L01_ReadReg(NRF24L01_17_FIFO_STATUS) & BIT(NRF24L01_17_FIFO_STATUS_TX_EMPTY))) {
             delayMicroseconds(fifoDelayUs);
             totalDelayUs += fifoDelayUs;
         }
@@ -244,7 +244,7 @@ rx_spi_received_e cx10Nrf24DataReceived(uint8_t *payload)
             XN297_WritePayload(payload, payloadSize, rxAddr);
             NRF24L01_SetTxMode();// enter transmit mode to send the packet
             // wait for the ACK packet to send before changing channel
-            while (!(NRF24L01_ReadReg(NRF24L01_17_FIFO_STATUS) & BV(NRF24L01_17_FIFO_STATUS_TX_EMPTY))) {
+            while (!(NRF24L01_ReadReg(NRF24L01_17_FIFO_STATUS) & BIT(NRF24L01_17_FIFO_STATUS_TX_EMPTY))) {
                 delayMicroseconds(fifoDelayUs);
                 totalDelayUs += fifoDelayUs;
             }
@@ -299,9 +299,11 @@ static void cx10Nrf24Setup(rx_spi_protocol_e protocol)
     NRF24L01_SetRxMode(); // enter receive mode to start listening for packets
 }
 
-bool cx10Nrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool cx10Nrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState, rxSpiExtiConfig_t *extiConfig)
 {
-    rxRuntimeConfig->channelCount = RC_CHANNEL_COUNT;
+    UNUSED(extiConfig);
+
+    rxRuntimeState->channelCount = RC_CHANNEL_COUNT;
     cx10Nrf24Setup((rx_spi_protocol_e)rxSpiConfig->rx_spi_protocol);
 
     return true;

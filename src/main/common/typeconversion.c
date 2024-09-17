@@ -19,6 +19,7 @@
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -166,7 +167,7 @@ char *ftoa(float x, char *floatString)
 
     value = (int32_t)(x * 1000.0f);    // Convert float * 1000 to an integer
 
-    itoa(ABS(value), intString1, 10);   // Create string from abs of integer value
+    itoa(abs(value), intString1, 10);   // Create string from abs of integer value
 
     if (value >= 0)
         intString2[0] = ' ';    // Positive number, add a pad space
@@ -191,7 +192,7 @@ char *ftoa(float x, char *floatString)
 
     dpLocation = strlen(intString2) - 3;
 
-    strncpy(floatString, intString2, dpLocation);
+    memcpy(floatString, intString2, dpLocation);
     floatString[dpLocation] = '\0';
     strcat(floatString, decimalPoint);
     strcat(floatString, intString2 + dpLocation);

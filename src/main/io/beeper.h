@@ -21,12 +21,16 @@
 #pragma once
 
 #include "common/time.h"
+#include "common/utils.h"
 
-#define BEEPER_GET_FLAG(mode) (1 << (mode - 1))
+#define BEEPER_GET_FLAG(mode) (1U << ((mode) - 1))
 
 #ifdef USE_DSHOT
 #define DSHOT_BEACON_GUARD_DELAY_US 1200000  // Time to separate dshot beacon and armining/disarming events
                                              // to prevent interference with motor direction commands
+#define DSHOT_BEACON_MODE_INTERVAL_US     450000  // at least 450ms between successive DShot beacon iterations to allow time for ESC to play tone
+#define DSHOT_BEACON_RXLOSS_INTERVAL_US   950000  // at least 950ms between successive DShot beacon iterations to allow time for ESC to play tone
+                                                  // we check beeper every 100ms, so these result in 500ms and 1.0s in practice
 #endif
 
 typedef enum {
@@ -61,6 +65,7 @@ typedef enum {
     // BEEPER_ALL must remain at the bottom of this enum
 } beeperMode_e;
 
+STATIC_ASSERT(BEEPER_ALL < sizeof(uint32_t) * 8, "BEEPER bits exhausted");
 
 #define BEEPER_ALLOWED_MODES ( \
     BEEPER_GET_FLAG(BEEPER_GYRO_CALIBRATED) \
@@ -92,6 +97,18 @@ typedef enum {
 #define DSHOT_BEACON_ALLOWED_MODES ( \
     BEEPER_GET_FLAG(BEEPER_RX_LOST) \
     | BEEPER_GET_FLAG(BEEPER_RX_SET) )
+
+// record theese modes as arming beep (for dshot)
+#define BEEPER_ARMING_MODES (                   \
+    BEEPER_GET_FLAG(BEEPER_ARMING)              \
+    | BEEPER_GET_FLAG(BEEPER_ARMING_GPS_FIX)    \
+    | BEEPER_GET_FLAG(BEEPER_ARMING_GPS_NO_FIX) \
+    )
+#ifdef USE_RACE_PRO
+#define DEFAULT_DSHOT_BEACON_OFF_FLAGS BEEPER_GET_FLAG(BEEPER_RX_LOST)
+#else
+#define DEFAULT_DSHOT_BEACON_OFF_FLAGS DSHOT_BEACON_ALLOWED_MODES
+#endif // USE_RACE_PRO
 
 void beeper(beeperMode_e mode);
 void beeperSilence(void);

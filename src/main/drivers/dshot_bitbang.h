@@ -29,13 +29,15 @@ typedef enum {
 } dshotBitbangMode_e;
 
 typedef enum {
-    DSHOT_BITBANG_OK,
-    DSHOT_BITBANG_MOTOR_PIN_CONFLICT,
-    DSHOT_BITBANG_NO_PACER
+    DSHOT_BITBANG_STATUS_OK,
+    DSHOT_BITBANG_STATUS_MOTOR_PIN_CONFLICT,
+    DSHOT_BITBANG_STATUS_NO_PACER,
+    DSHOT_BITBANG_STATUS_TOO_MANY_PORTS,
 } dshotBitbangStatus_e;
 
 struct motorDevConfig_s;
 struct motorDevice_s;
 struct motorDevice_s *dshotBitbangDevInit(const struct motorDevConfig_s *motorConfig, uint8_t motorCount);
 dshotBitbangStatus_e dshotBitbangGetStatus();
-const resourceOwner_t *dshotBitbangTimerGetOwner(int8_t timerNumber, uint16_t timerChannel);
+const timerHardware_t *dshotBitbangTimerGetAllocatedByNumberAndChannel(int8_t timerNumber, uint16_t timerChannel);
+const resourceOwner_t *dshotBitbangTimerGetOwner(const timerHardware_t *timer);

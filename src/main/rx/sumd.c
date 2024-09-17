@@ -54,6 +54,20 @@
 #define SUMD_BUFFSIZE (SUMD_MAX_CHANNEL * 2 + 5) // 6 channels + 5 = 17 bytes for 6 channels
 
 #define SUMD_BAUDRATE 115200
+#define SUMD_TIME_NEEDED_PER_FRAME 4000
+
+#define SUMD_OFFSET_CHANNEL_1_HIGH 3
+#define SUMD_OFFSET_CHANNEL_1_LOW 4
+#define SUMD_BYTES_PER_CHANNEL 2
+#define SUMD_SYNC_BYTE_INDEX 0
+#define SUMD_CHANNEL_COUNT_INDEX 2
+
+#define SUMD_HEADER_LENGTH 3
+#define SUMD_CRC_LENGTH 2
+
+#define SUMDV1_FRAME_STATE_OK 0x01
+#define SUMDV3_FRAME_STATE_OK 0x03
+#define SUMD_FRAME_STATE_FAILSAFE 0x81
 
 static bool sumdFrameDone = false;
 static uint16_t sumdChannels[MAX_SUPPORTED_RC_CHANNEL_COUNT];
@@ -61,56 +75,50 @@ static uint16_t crc;
 
 static uint8_t sumd[SUMD_BUFFSIZE] = { 0, };
 static uint8_t sumdChannelCount;
+static timeUs_t lastFrameTimeUs = 0;
 
 // Receive ISR callback
 static void sumdDataReceive(uint16_t c, void *data)
 {
     UNUSED(data);
 
-    uint32_t sumdTime;
-    static uint32_t sumdTimeLast;
+    static timeUs_t sumdTimeLast;
     static uint8_t sumdIndex;
 
-    sumdTime = micros();
-    if ((sumdTime - sumdTimeLast) > 4000)
+    const timeUs_t now = microsISR();
+    if (cmpTimeUs(now, sumdTimeLast) > SUMD_TIME_NEEDED_PER_FRAME) {
         sumdIndex = 0;
-    sumdTimeLast = sumdTime;
+    }
+    sumdTimeLast = now;
 
-    if (sumdIndex == 0) {
-        if (c != SUMD_SYNCBYTE)
+    if (sumdIndex == SUMD_SYNC_BYTE_INDEX) {
+        if (c != SUMD_SYNCBYTE) {
             return;
-        else
-        {
+        } else {
             sumdFrameDone = false; // lazy main loop didnt fetch the stuff
             crc = 0;
         }
-    }
-    if (sumdIndex == 2)
+    } else if (sumdIndex == SUMD_CHANNEL_COUNT_INDEX) {
         sumdChannelCount = (uint8_t)c;
-    if (sumdIndex < SUMD_BUFFSIZE)
+    }
+
+    if (sumdIndex < SUMD_BUFFSIZE) {
         sumd[sumdIndex] = (uint8_t)c;
+    }
+
     sumdIndex++;
-    if (sumdIndex < sumdChannelCount * 2 + 4)
+    if (sumdIndex <= sumdChannelCount * SUMD_BYTES_PER_CHANNEL + SUMD_HEADER_LENGTH) {
         crc = crc16_ccitt(crc, (uint8_t)c);
-    else
-        if (sumdIndex == sumdChannelCount * 2 + 5) {
-            sumdIndex = 0;
-            sumdFrameDone = true;
-        }
+    } else if (sumdIndex == sumdChannelCount * SUMD_BYTES_PER_CHANNEL + SUMD_HEADER_LENGTH + SUMD_CRC_LENGTH) {
+        lastFrameTimeUs = now;
+        sumdIndex = 0;
+        sumdFrameDone = true;
+    }
 }
 
-#define SUMD_OFFSET_CHANNEL_1_HIGH 3
-#define SUMD_OFFSET_CHANNEL_1_LOW 4
-#define SUMD_BYTES_PER_CHANNEL 2
-
-
-#define SUMDV1_FRAME_STATE_OK 0x01
-#define SUMDV3_FRAME_STATE_OK 0x03
-#define SUMD_FRAME_STATE_FAILSAFE 0x81
-
-static uint8_t sumdFrameStatus(rxRuntimeConfig_t *rxRuntimeConfig)
+static uint8_t sumdFrameStatus(rxRuntimeState_t *rxRuntimeState)
 {
-    UNUSED(rxRuntimeConfig);
+    UNUSED(rxRuntimeState);
 
     uint8_t frameStatus = RX_FRAME_PENDING;
 
@@ -121,11 +129,10 @@ static uint8_t sumdFrameStatus(rxRuntimeConfig_t *rxRuntimeConfig)
     sumdFrameDone = false;
 
     // verify CRC
-    if (crc != ((sumd[SUMD_BYTES_PER_CHANNEL * sumdChannelCount + SUMD_OFFSET_CHANNEL_1_HIGH] << 8) |
-            (sumd[SUMD_BYTES_PER_CHANNEL * sumdChannelCount + SUMD_OFFSET_CHANNEL_1_LOW])))
-        return frameStatus;
+    if (crc == ((sumd[SUMD_BYTES_PER_CHANNEL * sumdChannelCount + SUMD_OFFSET_CHANNEL_1_HIGH] << 8) |
+            (sumd[SUMD_BYTES_PER_CHANNEL * sumdChannelCount + SUMD_OFFSET_CHANNEL_1_LOW]))) {
 
-    switch (sumd[1]) {
+        switch (sumd[1]) {
         case SUMD_FRAME_STATE_FAILSAFE:
             frameStatus = RX_FRAME_COMPLETE | RX_FRAME_FAILSAFE;
             break;
@@ -133,36 +140,41 @@ static uint8_t sumdFrameStatus(rxRuntimeConfig_t *rxRuntimeConfig)
         case SUMDV3_FRAME_STATE_OK:
             frameStatus = RX_FRAME_COMPLETE;
             break;
-        default:
-            return frameStatus;
+        }
+
+        if (frameStatus & RX_FRAME_COMPLETE) {
+            const unsigned channelsToProcess = MIN(sumdChannelCount, MAX_SUPPORTED_RC_CHANNEL_COUNT);
+
+            for (unsigned channelIndex = 0; channelIndex < channelsToProcess; channelIndex++) {
+                sumdChannels[channelIndex] = (
+                    (sumd[SUMD_BYTES_PER_CHANNEL * channelIndex + SUMD_OFFSET_CHANNEL_1_HIGH] << 8) |
+                    sumd[SUMD_BYTES_PER_CHANNEL * channelIndex + SUMD_OFFSET_CHANNEL_1_LOW]
+                );
+            }
+        }
     }
 
-    unsigned channelsToProcess = MIN(sumdChannelCount, MAX_SUPPORTED_RC_CHANNEL_COUNT);
-
-    for (unsigned channelIndex = 0; channelIndex < channelsToProcess; channelIndex++) {
-        sumdChannels[channelIndex] = (
-            (sumd[SUMD_BYTES_PER_CHANNEL * channelIndex + SUMD_OFFSET_CHANNEL_1_HIGH] << 8) |
-            sumd[SUMD_BYTES_PER_CHANNEL * channelIndex + SUMD_OFFSET_CHANNEL_1_LOW]
-        );
+    if (!(frameStatus & (RX_FRAME_FAILSAFE | RX_FRAME_DROPPED))) {
+        rxRuntimeState->lastRcFrameTimeUs = lastFrameTimeUs;
     }
+
     return frameStatus;
 }
 
-static uint16_t sumdReadRawRC(const rxRuntimeConfig_t *rxRuntimeConfig, uint8_t chan)
+static float sumdReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
 {
-    UNUSED(rxRuntimeConfig);
-    return sumdChannels[chan] / 8;
+    UNUSED(rxRuntimeState);
+    return (float)sumdChannels[chan] / 8;
 }
 
-bool sumdInit(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool sumdInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
 {
     UNUSED(rxConfig);
 
-    rxRuntimeConfig->channelCount = MIN(SUMD_MAX_CHANNEL, MAX_SUPPORTED_RC_CHANNEL_COUNT);
-    rxRuntimeConfig->rxRefreshRate = 11000;
-
-    rxRuntimeConfig->rcReadRawFn = sumdReadRawRC;
-    rxRuntimeConfig->rcFrameStatusFn = sumdFrameStatus;
+    rxRuntimeState->channelCount = MIN(SUMD_MAX_CHANNEL, MAX_SUPPORTED_RC_CHANNEL_COUNT);
+    rxRuntimeState->rcReadRawFn = sumdReadRawRC;
+    rxRuntimeState->rcFrameStatusFn = sumdFrameStatus;
+    rxRuntimeState->rcFrameTimeUsFn = rxFrameTimeUs;
 
     const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RX_SERIAL);
     if (!portConfig) {
@@ -170,7 +182,7 @@ bool sumdInit(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
     }
 
 #ifdef USE_TELEMETRY
-    bool portShared = telemetryCheckRxPortShared(portConfig);
+    bool portShared = telemetryCheckRxPortShared(portConfig, rxRuntimeState->serialrxProvider);
 #else
     bool portShared = false;
 #endif

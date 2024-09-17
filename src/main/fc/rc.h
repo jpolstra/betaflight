@@ -20,34 +20,32 @@
 
 #pragma once
 
+#include "drivers/time.h"
+
 #include "fc/rc_controls.h"
 
-typedef enum {
-    INTERPOLATION_CHANNELS_RP,
-    INTERPOLATION_CHANNELS_RPY,
-    INTERPOLATION_CHANNELS_RPYT,
-    INTERPOLATION_CHANNELS_T,
-    INTERPOLATION_CHANNELS_RPT,
-} interpolationChannels_e;
-
-extern uint16_t currentRxRefreshRate;
+#ifdef USE_RC_SMOOTHING_FILTER
+#define RC_SMOOTHING_AUTO_FACTOR_MIN 0
+#define RC_SMOOTHING_AUTO_FACTOR_MAX 250
+#endif
 
 void processRcCommand(void);
 float getSetpointRate(int axis);
 float getRcDeflection(int axis);
+float getRcDeflectionRaw(int axis);
 float getRcDeflectionAbs(int axis);
-float getThrottlePIDAttenuation(void);
+float getMaxRcDeflectionAbs(void);
 void updateRcCommands(void);
 void resetYawAxis(void);
 void initRcProcessing(void);
 bool isMotorsReversed(void);
-bool rcSmoothingIsEnabled(void);
 rcSmoothingFilter_t *getRcSmoothingData(void);
 bool rcSmoothingAutoCalculate(void);
 bool rcSmoothingInitializationComplete(void);
-float getRawSetpoint(int axis);
-float getRawDeflection(int axis);
-float applyCurve(int axis, float deflection);
-uint32_t getRcFrameNumber();
-float getRcCurveSlope(int axis, float deflection);
-bool rcIsDuplicateFrame();
+
+float getMaxRcRate(int axis);
+float getFeedforward(int axis);
+
+void updateRcRefreshRate(timeUs_t currentTimeUs);
+uint16_t getCurrentRxIntervalUs(void);
+bool getRxRateValid(void);

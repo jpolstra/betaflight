@@ -24,11 +24,16 @@
 #include <stdbool.h>
 
 #include "pg/pg.h"
+#include "drivers/adc.h"
 #include "drivers/io_types.h"
+#include "drivers/dma_reqmap.h"
 
 typedef struct adcChannelConfig_t {
     bool enabled;
     ioTag_t ioTag;
+#if defined(STM32H7)
+    int8_t device; // ADCDevice
+#endif
 } adcChannelConfig_t;
 
 typedef struct adcConfig_s {
@@ -42,7 +47,7 @@ typedef struct adcConfig_s {
     uint16_t tempSensorCalibration1;
     uint16_t tempSensorCalibration2;
 
-    uint8_t dmaopt[3]; // One per ADCDEV_x
+    int8_t dmaopt[ADCDEV_COUNT]; // One per ADCDEV_x
 } adcConfig_t;
 
 PG_DECLARE(adcConfig_t, adcConfig);

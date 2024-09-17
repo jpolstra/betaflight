@@ -15,35 +15,52 @@
  * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 extern "C" {
+
     #include "blackbox/blackbox.h"
+
     #include "build/debug.h"
+
+    #include "common/filter.h"
     #include "common/maths.h"
+
+    #include "config/config.h"
     #include "config/feature.h"
-    #include "pg/pg.h"
-    #include "pg/pg_ids.h"
-    #include "pg/rx.h"
-    #include "fc/config.h"
+
     #include "fc/controlrate_profile.h"
     #include "fc/core.h"
     #include "fc/rc_controls.h"
     #include "fc/rc_modes.h"
     #include "fc/runtime_config.h"
+
     #include "flight/failsafe.h"
+    #include "flight/gps_rescue.h"
     #include "flight/imu.h"
     #include "flight/mixer.h"
     #include "flight/pid.h"
+    #include "flight/position.h"
     #include "flight/servos.h"
+
     #include "io/beeper.h"
     #include "io/gps.h"
+
+    #include "pg/gps_rescue.h"
+    #include "pg/motor.h"
+    #include "pg/pg.h"
+    #include "pg/pg_ids.h"
+    #include "pg/rx.h"
+
     #include "rx/rx.h"
+
     #include "scheduler/scheduler.h"
+
     #include "sensors/acceleration.h"
     #include "sensors/gyro.h"
+
     #include "telemetry/telemetry.h"
-    #include "flight/gps_rescue.h"
 
     PG_REGISTER(accelerometerConfig_t, accelerometerConfig, PG_ACCELEROMETER_CONFIG, 0);
     PG_REGISTER(blackboxConfig_t, blackboxConfig, PG_BLACKBOX_CONFIG, 0);
@@ -55,9 +72,13 @@ extern "C" {
     PG_REGISTER(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 0);
     PG_REGISTER(telemetryConfig_t, telemetryConfig, PG_TELEMETRY_CONFIG, 0);
     PG_REGISTER(failsafeConfig_t, failsafeConfig, PG_FAILSAFE_CONFIG, 0);
+    PG_REGISTER(motorConfig_t, motorConfig, PG_MOTOR_CONFIG, 0);
+    PG_REGISTER(imuConfig_t, imuConfig, PG_IMU_CONFIG, 0);
+    PG_REGISTER(gpsConfig_t, gpsConfig, PG_GPS_CONFIG, 0);
+    PG_REGISTER(gpsRescueConfig_t, gpsRescueConfig, PG_GPS_RESCUE, 0);
+    PG_REGISTER(positionConfig_t, positionConfig, PG_POSITION, 0);
 
-    float rcCommand[4];
-    int16_t rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
+    float rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
     uint16_t averageSystemLoadPercent = 0;
     uint8_t cliMode = 0;
     uint8_t debugMode = 0;
@@ -69,10 +90,17 @@ extern "C" {
     uint32_t targetPidLooptime;
     bool cmsInMenu = false;
     float axisPID_P[3], axisPID_I[3], axisPID_D[3], axisPIDSum[3];
-    rxRuntimeConfig_t rxRuntimeConfig = {};
-    uint16_t GPS_distanceToHome = 0;
+    rxRuntimeState_t rxRuntimeState = {};
+    uint32_t GPS_distanceToHomeCm = 0;
     int16_t GPS_directionToHome = 0;
     acc_t acc = {};
+    bool mockIsUpright = false;
+    uint8_t activePidLoopDenom = 1;
+
+    float getGpsDataIntervalSeconds(void) { return 0.1f; }
+    void pt1FilterUpdateCutoff(pt1Filter_t *filter, float k) { filter->k = k; }
+    void pt2FilterUpdateCutoff(pt2Filter_t *filter, float k) { filter->k = k; }
+    void pt3FilterUpdateCutoff(pt3Filter_t *filter, float k) { filter->k = k; }
 }
 
 uint32_t simulationFeatureFlags = 0;
@@ -87,6 +115,7 @@ TEST(ArmingPreventionTest, CalibrationPowerOnGraceAngleThrottleArmSwitch)
     // given
     simulationTime = 0;
     gyroCalibDone = false;
+    sensorsSet(SENSOR_GYRO);
 
     // and
     modeActivationConditionsMutable(0)->auxChannelIndex = 0;
@@ -129,7 +158,7 @@ TEST(ArmingPreventionTest, CalibrationPowerOnGraceAngleThrottleArmSwitch)
 
     // given
     // quad is level
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // when
     updateArmingStatus();
@@ -177,6 +206,7 @@ TEST(ArmingPreventionTest, ArmingGuardRadioLeftOnAndArmed)
     // given
     simulationTime = 0;
     gyroCalibDone = false;
+    sensorsSet(SENSOR_GYRO);
 
     // and
     modeActivationConditionsMutable(0)->auxChannelIndex = 0;
@@ -190,7 +220,7 @@ TEST(ArmingPreventionTest, ArmingGuardRadioLeftOnAndArmed)
 
     // and
     rcData[THROTTLE] = 1000;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // when
     updateActivatedModes();
@@ -268,7 +298,7 @@ TEST(ArmingPreventionTest, Prearm)
 
     // given
     rcData[THROTTLE] = 1000;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // when
     updateActivatedModes();
@@ -311,7 +341,7 @@ TEST(ArmingPreventionTest, RadioTurnedOnAtAnyTimeArmed)
 
     // and
     rcData[THROTTLE] = 1000;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // and
     // RX has no link to radio
@@ -342,7 +372,7 @@ TEST(ArmingPreventionTest, RadioTurnedOnAtAnyTimeArmed)
     // expect
     EXPECT_FALSE(isUsingSticksForArming());
     EXPECT_TRUE(isArmingDisabled());
-    EXPECT_EQ(ARMING_DISABLED_BAD_RX_RECOVERY | ARMING_DISABLED_ARM_SWITCH, getArmingDisableFlags());
+    EXPECT_EQ(ARMING_DISABLED_NOT_DISARMED | ARMING_DISABLED_ARM_SWITCH, getArmingDisableFlags());
 
     // given
     // arm switch turned off by user
@@ -378,7 +408,7 @@ TEST(ArmingPreventionTest, In3DModeAllowArmingWhenEnteringThrottleDeadband)
 
     // and
     rcData[THROTTLE] = 1400;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
     simulationHaveRx = true;
 
     // and
@@ -447,7 +477,7 @@ TEST(ArmingPreventionTest, When3DModeDisabledThenNormalThrottleArmingConditionAp
     // and
     // safe throttle value for 3D mode
     rcData[THROTTLE] = 1500;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
     simulationHaveRx = true;
 
     // and
@@ -545,7 +575,7 @@ TEST(ArmingPreventionTest, WhenUsingSwitched3DModeThenNormalThrottleArmingCondit
 
     // and
     rcData[THROTTLE] = 1000;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
     simulationHaveRx = true;
 
     // and
@@ -641,7 +671,7 @@ TEST(ArmingPreventionTest, GPSRescueWithoutFixPreventsArm)
     rcData[THROTTLE] = 1000;
     rcData[AUX1] = 1000;
     rcData[AUX2] = 1000;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // when
     updateActivatedModes();
@@ -673,7 +703,7 @@ TEST(ArmingPreventionTest, GPSRescueWithoutFixPreventsArm)
     rcData[AUX1] = 1000;
 
     // when
-    disarm();
+    disarm(DISARM_REASON_SYSTEM);
     updateActivatedModes();
     updateArmingStatus();
 
@@ -717,7 +747,7 @@ TEST(ArmingPreventionTest, GPSRescueWithoutFixPreventsArm)
     rcData[AUX1] = 1000;
 
     // when
-    disarm();
+    disarm(DISARM_REASON_SYSTEM);
     updateActivatedModes();
     updateArmingStatus();
 
@@ -755,7 +785,7 @@ TEST(ArmingPreventionTest, GPSRescueSwitchPreventsArm)
     rcData[THROTTLE] = 1000;
     rcData[AUX1] = 1000;
     rcData[AUX2] = 1800; // Start out with rescue enabled
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // when
     updateActivatedModes();
@@ -787,7 +817,7 @@ TEST(ArmingPreventionTest, GPSRescueSwitchPreventsArm)
     rcData[AUX1] = 1000;
 
     // when
-    disarm();
+    disarm(DISARM_REASON_SYSTEM);
     updateActivatedModes();
     updateArmingStatus();
 
@@ -831,7 +861,7 @@ TEST(ArmingPreventionTest, GPSRescueSwitchPreventsArm)
     rcData[AUX1] = 1000;
 
     // when
-    disarm();
+    disarm(DISARM_REASON_SYSTEM);
     updateActivatedModes();
     updateArmingStatus();
 
@@ -867,7 +897,7 @@ TEST(ArmingPreventionTest, ParalyzeOnAtBoot)
     rcData[THROTTLE] = 1000;
     rcData[AUX1] = 1000;
     rcData[AUX2] = 1800; // Paralyze on at boot
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // when
     updateActivatedModes();
@@ -918,7 +948,7 @@ TEST(ArmingPreventionTest, Paralyze)
     rcData[AUX1] = 1000;
     rcData[AUX2] = 1800; // Start out with paralyze enabled
     rcData[AUX3] = 1000;
-    ENABLE_STATE(SMALL_ANGLE);
+    mockIsUpright = true;
 
     // when
     updateActivatedModes();
@@ -948,7 +978,7 @@ TEST(ArmingPreventionTest, Paralyze)
     rcData[AUX1] = 1000;
 
     // when
-    disarm();
+    disarm(DISARM_REASON_SYSTEM);
     updateActivatedModes();
     updateArmingStatus();
 
@@ -1001,7 +1031,7 @@ TEST(ArmingPreventionTest, Paralyze)
     // expect
     EXPECT_TRUE(IS_RC_MODE_ACTIVE(BOXVTXPITMODE));
     EXPECT_TRUE(IS_RC_MODE_ACTIVE(BOXBEEPERON));
-    
+
     // given
     // try exiting paralyze mode and ensure arming and pit mode are still disabled
     rcData[AUX2] = 1000;
@@ -1035,24 +1065,26 @@ extern "C" {
     void saveConfigAndNotify(void) {}
     void blackboxFinish(void) {}
     bool accIsCalibrationComplete(void) { return true; }
-    bool isBaroCalibrationComplete(void) { return true; }
-    bool isGyroCalibrationComplete(void) { return gyroCalibDone; }
+    bool baroIsCalibrated(void) { return true; }
+    bool gyroIsCalibrationComplete(void) { return gyroCalibDone; }
     void gyroStartCalibration(bool) {}
     bool isFirstArmingGyroCalibrationRunning(void) { return false; }
     void pidController(const pidProfile_t *, timeUs_t) {}
     void pidStabilisationState(pidStabilisationState_e) {}
-    void mixTable(timeUs_t , uint8_t) {};
+    void mixTable(timeUs_t) {};
     void writeMotors(void) {};
     void writeServos(void) {};
     bool calculateRxChannelsAndUpdateFailsafe(timeUs_t) { return true; }
     bool isMixerUsingServos(void) { return false; }
-    void gyroUpdate(timeUs_t) {}
-    timeDelta_t getTaskDeltaTime(cfTaskId_e) { return 0; }
+    void gyroUpdate(void) {}
+    timeDelta_t getTaskDeltaTimeUs(taskId_e) { return 0; }
     void updateRSSI(timeUs_t) {}
     bool failsafeIsMonitoring(void) { return false; }
     void failsafeStartMonitoring(void) {}
     void failsafeUpdateState(void) {}
     bool failsafeIsActive(void) { return false; }
+    bool failsafeIsReceivingRxData(void) { return true; }
+    bool rxAreFlightChannelsValid(void) { return false; }
     void pidResetIterm(void) {}
     void updateAdjustmentStates(void) {}
     void processRcAdjustments(controlRateConfig_t *) {}
@@ -1070,14 +1102,15 @@ extern "C" {
     void blackboxUpdate(timeUs_t) {}
     void transponderUpdate(timeUs_t) {}
     void GPS_reset_home_position(void) {}
-    void accSetCalibrationCycles(uint16_t) {}
-    void baroSetCalibrationCycles(uint16_t) {}
+    void accStartCalibration(void) {}
+    bool accHasBeenCalibrated(void) { return true; }
+    void baroSetGroundLevel(void) {}
     void changePidProfile(uint8_t) {}
     void changeControlRateProfile(uint8_t) {}
     void dashboardEnablePageCycling(void) {}
     void dashboardDisablePageCycling(void) {}
     bool imuQuaternionHeadfreeOffsetSet(void) { return true; }
-    void rescheduleTask(cfTaskId_e, uint32_t) {}
+    void rescheduleTask(taskId_e, timeDelta_t) {}
     bool usbCableIsInserted(void) { return false; }
     bool usbVcpIsConnected(void) { return false; }
     void pidSetAntiGravityState(bool) {}
@@ -1085,9 +1118,48 @@ extern "C" {
     float scaleRangef(float, float, float, float, float) { return 0.0f; }
     bool crashRecoveryModeActive(void) { return false; }
     int32_t getEstimatedAltitudeCm(void) { return 0; }
-    bool gpsIsHealthy() { return false; }
-    bool isAltitudeOffset(void) { return false; }
+    bool gpsIsHealthy(void) { return false; }
     float getCosTiltAngle(void) { return 0.0f; }
     void pidSetItermReset(bool) {}
     void applyAccelerometerTrimsDelta(rollAndPitchTrims_t*) {}
+    bool isFixedWing(void) { return false; }
+    void compassStartCalibration(void) {}
+    bool compassIsCalibrationComplete(void) { return true; }
+    bool isUpright(void) { return mockIsUpright; }
+    void blackboxLogEvent(FlightLogEvent, union flightLogEventData_u *) {};
+    void gyroFiltering(timeUs_t) {};
+    timeDelta_t rxGetFrameDelta(timeDelta_t *) { return 0; }
+    void updateRcRefreshRate(timeUs_t) {};
+    uint16_t getAverageSystemLoadPercent(void) { return 0; }
+    bool isMotorProtocolEnabled(void) { return true; }
+    void pinioBoxTaskControl(void) {}
+    void schedulerSetNextStateTime(timeDelta_t) {}
+    float getAltitude(void) { return 3000.0f; }
+    float pt1FilterGain(float, float) { return 0.5f; }
+    float pt2FilterGain(float, float)  { return 0.1f; }
+    float pt3FilterGain(float, float)  { return 0.1f; }
+    void pt2FilterInit(pt2Filter_t *throttleDLpf, float) {
+        UNUSED(throttleDLpf);
+    }
+    float pt2FilterApply(pt2Filter_t *throttleDLpf, float) {
+        UNUSED(throttleDLpf);
+        return 0.0f;
+    }
+    void pt1FilterInit(pt1Filter_t *velocityDLpf, float) {
+        UNUSED(velocityDLpf);
+    }
+    float pt1FilterApply(pt1Filter_t *velocityDLpf, float) {
+        UNUSED(velocityDLpf);
+        return 0.0f;
+    }
+    void pt3FilterInit(pt3Filter_t *velocityUpsampleLpf, float) {
+        UNUSED(velocityUpsampleLpf);
+    }
+    float pt3FilterApply(pt3Filter_t *velocityUpsampleLpf, float) {
+        UNUSED(velocityUpsampleLpf);
+        return 0.0f;
+    }
+    void getRcDeflectionAbs(void) {}
+    uint32_t getCpuPercentageLate(void) { return 0; }
+    bool isAltitudeLow(void) {return false ;};
 }

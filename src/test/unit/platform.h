@@ -29,11 +29,11 @@
 #define NOINLINE
 #define FAST_CODE
 #define FAST_CODE_NOINLINE
-#define FAST_RAM_ZERO_INIT
-#define FAST_RAM
+#define FAST_DATA_ZERO_INIT
+#define FAST_DATA
 
-#define PID_PROFILE_COUNT 3
-#define CONTROL_RATE_PROFILE_COUNT  6
+#define PID_PROFILE_COUNT 4
+#define CONTROL_RATE_PROFILE_COUNT  4
 #define USE_MAG
 #define USE_BARO
 #define USE_GPS
@@ -42,6 +42,14 @@
 #define USE_LED_STRIP
 #define USE_SERVOS
 #define USE_TRANSPONDER
+
+#ifndef LED_STRIP_MAX_LENGTH
+    #ifdef USE_LED_STRIP_64
+        #define LED_STRIP_MAX_LENGTH           64
+    #else
+        #define LED_STRIP_MAX_LENGTH           32
+    #endif
+#endif // #ifndef LED_STRIP_MAX_LENGTH
 
 typedef enum
 {

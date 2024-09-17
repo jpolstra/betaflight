@@ -56,13 +56,13 @@ void i2cHardwareConfigure(const i2cConfig_t *i2cConfig)
         for (int pindex = 0 ; pindex < I2C_PIN_SEL_MAX ; pindex++) {
             if (i2cConfig[device].ioTagScl == hardware->sclPins[pindex].ioTag) {
                 pDev->scl = IOGetByTag(i2cConfig[device].ioTagScl);
-#if defined(STM32F4) || defined(STM32H7)
+#if defined(STM32F4) || defined(STM32H7) || defined(STM32G4) || defined(AT32F4) || defined(APM32F4)
                 pDev->sclAF = hardware->sclPins[pindex].af;
 #endif
             }
             if (i2cConfig[device].ioTagSda == hardware->sdaPins[pindex].ioTag) {
                 pDev->sda = IOGetByTag(i2cConfig[device].ioTagSda);
-#if defined(STM32F4) || defined(STM32H7)
+#if defined(STM32F4) || defined(STM32H7) || defined(STM32G4) || defined(AT32F4) || defined(APM32F4)
                 pDev->sdaAF = hardware->sdaPins[pindex].af;
 #endif
             }
@@ -71,8 +71,8 @@ void i2cHardwareConfigure(const i2cConfig_t *i2cConfig)
         if (pDev->scl && pDev->sda) {
             pDev->hardware = hardware;
             pDev->reg = hardware->reg;
-            pDev->overClock = i2cConfig[device].overClock;
             pDev->pullUp = i2cConfig[device].pullUp;
+            pDev->clockSpeed = i2cConfig[device].clockSpeed;
         }
     }
 }

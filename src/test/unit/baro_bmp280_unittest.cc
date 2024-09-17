@@ -44,7 +44,7 @@ typedef struct bmp280_calib_param_s {
     int16_t dig_P9; /* calibration P9 data */
 } __attribute__((packed)) bmp280_calib_param_t; // packed as we read directly from the device into this structure.
 
-bmp280_calib_param_t bmp280_cal;
+extern bmp280_calib_param_t bmp280_cal;
 }
 
 
@@ -147,31 +147,40 @@ TEST(baroBmp280Test, TestBmp280CalculateZeroP)
 extern "C" {
 
 void delay(uint32_t) {}
-bool busBusy(const busDevice_t*, bool*) {return false;}
-bool busReadRegisterBuffer(const busDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
-bool busReadRegisterBufferStart(const busDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
-bool busWriteRegister(const busDevice_t*, uint8_t, uint8_t) {return true;}
-bool busWriteRegisterStart(const busDevice_t*, uint8_t, uint8_t) {return true;}
+bool busBusy(const extDevice_t*, bool*) {return false;}
+bool busReadRegisterBuffer(const extDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
+bool busReadRegisterBufferStart(const extDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
+bool busWriteRegister(const extDevice_t*, uint8_t, uint8_t) {return true;}
+bool busWriteRegisterStart(const extDevice_t*, uint8_t, uint8_t) {return true;}
+void busDeviceRegister(const extDevice_t*) {}
 
-void spiBusSetDivisor() {
+uint16_t spiCalculateDivider()
+{
+    return 2;
 }
 
-void spiBusTransactionInit() {
+void spiSetClkDivisor()
+{
 }
 
-void spiPreinitByIO() {
+void spiPreinitByIO()
+{
 }
 
-void IOConfigGPIO() {
+void IOConfigGPIO()
+{
 }
 
-void IOHi() {
+void IOHi()
+{
 }
 
-void IOInit() {
+void IOInit()
+{
 }
 
-void IORelease() {
+void IORelease()
+{
 }
 
 

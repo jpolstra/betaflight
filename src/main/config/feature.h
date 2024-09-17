@@ -25,10 +25,23 @@
 #ifndef DEFAULT_FEATURES
 #define DEFAULT_FEATURES 0
 #endif
+
 #ifndef DEFAULT_RX_FEATURE
-#define DEFAULT_RX_FEATURE FEATURE_RX_PARALLEL_PWM
+
+#if defined(USE_SERIALRX)
+#define DEFAULT_RX_FEATURE FEATURE_RX_SERIAL
+#elif defined(USE_RX_MSP)
+#define DEFAULT_RX_FEATURE FEATURE_RX_MSP
+#elif defined(USE_RX_SPI)
+// need to test with FEATURE_RX_EXPRESSLRS
+#define DEFAULT_RX_FEATURE FEATURE_RX_SPI
 #endif
 
+#endif // DEFAULT_RX_FEATURE
+
+// features must be listed in
+//  config/feature.c:featuresSupportedByBuild
+//  cli/cli.c:featureNames
 typedef enum {
     FEATURE_RX_PPM = 1 << 0,
     FEATURE_INFLIGHT_ACC_CAL = 1 << 2,
@@ -50,10 +63,10 @@ typedef enum {
     FEATURE_TRANSPONDER = 1 << 21,
     FEATURE_AIRMODE = 1 << 22,
     FEATURE_RX_SPI = 1 << 25,
-    FEATURE_SOFTSPI = 1 << 26,
+    //FEATURE_SOFTSPI = 1 << 26, (removed)
     FEATURE_ESC_SENSOR = 1 << 27,
     FEATURE_ANTI_GRAVITY = 1 << 28,
-    FEATURE_DYNAMIC_FILTER = 1 << 29,
+    //FEATURE_DYNAMIC_FILTER = 1 << 29, (removed)
 } features_e;
 
 typedef struct featureConfig_s {
@@ -62,10 +75,15 @@ typedef struct featureConfig_s {
 
 PG_DECLARE(featureConfig_t, featureConfig);
 
-bool featureIsEnabled(const uint32_t mask);
-void featureEnable(const uint32_t mask);
-void featureDisable(const uint32_t mask);
-void featureDisableAll(void);
+// Mask of features that have code compiled in with current config.
+//  Other restrictions on available features may apply.
+extern uint32_t featuresSupportedByBuild;
 
-void featureSet(const uint32_t mask, uint32_t *features);
-void featureClear(const uint32_t mask, uint32_t *features);
+void featureInit(void);
+bool featureIsEnabled(const uint32_t mask);
+bool featureIsConfigured(const uint32_t mask);
+void featureEnableImmediate(const uint32_t mask);
+void featureDisableImmediate(const uint32_t mask);
+void featureConfigSet(const uint32_t mask);
+void featureConfigClear(const uint32_t mask);
+void featureConfigReplace(const uint32_t mask);

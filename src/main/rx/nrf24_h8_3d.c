@@ -131,8 +131,6 @@ STATIC_UNIT_TESTED bool h8_3dCheckBindPacket(const uint8_t *payload)
 
 STATIC_UNIT_TESTED uint16_t h8_3dConvertToPwm(uint8_t val, int16_t _min, int16_t _max)
 {
-#define PWM_RANGE (PWM_RANGE_MAX - PWM_RANGE_MIN)
-
     int32_t ret = val;
     const int32_t range = _max - _min;
     ret = PWM_RANGE_MIN + ((ret - _min) * PWM_RANGE)/range;
@@ -283,9 +281,11 @@ static void h8_3dNrf24Setup(rx_spi_protocol_e protocol, const uint32_t *rxSpiId)
     NRF24L01_SetRxMode(); // enter receive mode to start listening for packets
 }
 
-bool h8_3dNrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool h8_3dNrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState, rxSpiExtiConfig_t *extiConfig)
 {
-    rxRuntimeConfig->channelCount = RC_CHANNEL_COUNT;
+    UNUSED(extiConfig);
+
+    rxRuntimeState->channelCount = RC_CHANNEL_COUNT;
     h8_3dNrf24Setup((rx_spi_protocol_e)rxSpiConfig->rx_spi_protocol, &rxSpiConfig->rx_spi_id);
 
     return true;

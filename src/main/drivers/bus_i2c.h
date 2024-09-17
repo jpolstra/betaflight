@@ -37,9 +37,7 @@ typedef enum I2CDevice {
     I2CDEV_4,
 } I2CDevice;
 
-#if defined(STM32F1) || defined(STM32F3)
-#define I2CDEV_COUNT 2
-#elif defined(STM32F4)
+#if defined(STM32F4) || defined(APM32F4)
 #define I2CDEV_COUNT 3
 #elif defined(STM32F7)
 #define I2CDEV_COUNT 4
@@ -65,3 +63,4 @@ bool i2cRead(I2CDevice device, uint8_t addr_, uint8_t reg, uint8_t len, uint8_t*
 bool i2cBusy(I2CDevice device, bool *error);
 
 uint16_t i2cGetErrorCounter(void);
+uint8_t i2cGetRegisteredDeviceCount(void);

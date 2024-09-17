@@ -29,6 +29,7 @@
 #include "platform.h"
 
 #include "blackbox/blackbox.h"
+#include "blackbox/blackbox_io.h"
 
 #include "build/build_config.h"
 #include "build/debug.h"
@@ -44,18 +45,23 @@
 #include "common/streambuf.h"
 #include "common/utils.h"
 
+#include "config/config.h"
 #include "config/config_eeprom.h"
 #include "config/feature.h"
+#include "config/simplified_tuning.h"
 
 #include "drivers/accgyro/accgyro.h"
 #include "drivers/bus_i2c.h"
-#include "drivers/camera_control.h"
+#include "drivers/bus_spi.h"
+#include "drivers/camera_control_impl.h"
 #include "drivers/compass/compass.h"
+#include "drivers/display.h"
 #include "drivers/dshot.h"
-#include "drivers/flash.h"
+#include "drivers/dshot_command.h"
+#include "drivers/flash/flash.h"
 #include "drivers/io.h"
-#include "drivers/max7456.h"
 #include "drivers/motor.h"
+#include "drivers/osd.h"
 #include "drivers/pwm_output.h"
 #include "drivers/sdcard.h"
 #include "drivers/serial.h"
@@ -67,9 +73,9 @@
 #include "drivers/vtx_table.h"
 
 #include "fc/board_info.h"
-#include "fc/config.h"
 #include "fc/controlrate_profile.h"
 #include "fc/core.h"
+#include "fc/dispatch.h"
 #include "fc/rc.h"
 #include "fc/rc_adjustments.h"
 #include "fc/rc_controls.h"
@@ -81,6 +87,7 @@
 #include "flight/imu.h"
 #include "flight/mixer.h"
 #include "flight/pid.h"
+#include "flight/pid_init.h"
 #include "flight/position.h"
 #include "flight/rpm_filter.h"
 #include "flight/servos.h"
@@ -91,48 +98,56 @@
 #include "io/gimbal.h"
 #include "io/gps.h"
 #include "io/ledstrip.h"
-#include "io/motors.h"
 #include "io/serial.h"
 #include "io/serial_4way.h"
-#include "io/servos.h"
 #include "io/transponder_ir.h"
 #include "io/usb_msc.h"
 #include "io/vtx_control.h"
 #include "io/vtx.h"
+#include "io/vtx_msp.h"
 
 #include "msp/msp_box.h"
+#include "msp/msp_build_info.h"
 #include "msp/msp_protocol.h"
+#include "msp/msp_protocol_v2_betaflight.h"
+#include "msp/msp_protocol_v2_common.h"
 #include "msp/msp_serial.h"
 
 #include "osd/osd.h"
 #include "osd/osd_elements.h"
+#include "osd/osd_warnings.h"
 
 #include "pg/beeper.h"
 #include "pg/board.h"
+#include "pg/dyn_notch.h"
 #include "pg/gyrodev.h"
 #include "pg/motor.h"
 #include "pg/rx.h"
 #include "pg/rx_spi.h"
+#ifdef USE_RX_EXPRESSLRS
+#include "pg/rx_spi_expresslrs.h"
+#endif
 #include "pg/usb.h"
 #include "pg/vcd.h"
 #include "pg/vtx_table.h"
 
 #include "rx/rx.h"
+#include "rx/rx_bind.h"
 #include "rx/msp.h"
 
 #include "scheduler/scheduler.h"
 
-#include "sensors/battery.h"
-
 #include "sensors/acceleration.h"
+#include "sensors/adcinternal.h"
 #include "sensors/barometer.h"
+#include "sensors/battery.h"
 #include "sensors/boardalignment.h"
-#include "sensors/esc_sensor.h"
 #include "sensors/compass.h"
 #include "sensors/gyro.h"
+#include "sensors/gyro_init.h"
 #include "sensors/rangefinder.h"
-#include "sensors/sensors.h"
 
+#include "telemetry/msp_shared.h"
 #include "telemetry/telemetry.h"
 
 #ifdef USE_HARDWARE_REVISION_DETECTION
@@ -142,7 +157,7 @@
 #include "msp.h"
 
 
-static const char * const flightControllerIdentifier = BETAFLIGHT_IDENTIFIER; // 4 UPPER CASE alpha numeric characters that identify the flight controller.
+static const char * const flightControllerIdentifier = FC_FIRMWARE_IDENTIFIER; // 4 UPPER CASE alpha numeric characters that identify the flight controller.
 
 enum {
     MSP_REBOOT_FIRMWARE = 0,
@@ -172,6 +187,19 @@ typedef enum {
     MSP_FLASHFS_FLAG_SUPPORTED  = 2
 } mspFlashFsFlags_e;
 
+typedef enum {
+    MSP_PASSTHROUGH_ESC_SIMONK = PROTOCOL_SIMONK,
+    MSP_PASSTHROUGH_ESC_BLHELI = PROTOCOL_BLHELI,
+    MSP_PASSTHROUGH_ESC_KISS = PROTOCOL_KISS,
+    MSP_PASSTHROUGH_ESC_KISSALL = PROTOCOL_KISSALL,
+    MSP_PASSTHROUGH_ESC_CASTLE = PROTOCOL_CASTLE,
+
+    MSP_PASSTHROUGH_SERIAL_ID = 0xFD,
+    MSP_PASSTHROUGH_SERIAL_FUNCTION_ID = 0xFE,
+
+    MSP_PASSTHROUGH_ESC_4WAY = 0xFF,
+} mspPassthroughType_e;
+
 #define RATEPROFILE_MASK (1 << 7)
 
 #define RTC_NOT_SUPPORTED 0xff
@@ -185,45 +213,99 @@ typedef enum {
 static bool vtxTableNeedsInit = false;
 #endif
 
-static bool featureMaskIsCopied = false;
-static uint32_t featureMaskCopy;
+static int mspDescriptor = 0;
 
-static uint32_t getFeatureMask(void)
+mspDescriptor_t mspDescriptorAlloc(void)
 {
-    if (featureMaskIsCopied) {
-        return featureMaskCopy;
-    } else {
-        return featureConfig()->enabledFeatures;
-    }
+    return (mspDescriptor_t)mspDescriptor++;
 }
 
-#ifdef USE_SERIAL_4WAY_BLHELI_INTERFACE
-#define ESC_4WAY 0xff
+static uint32_t mspArmingDisableFlags = 0;
 
-uint8_t escMode;
-uint8_t escPortIndex;
-
-#ifdef USE_ESCSERIAL
-static void mspEscPassthroughFn(serialPort_t *serialPort)
+#ifndef SIMULATOR_BUILD
+static void mspArmingDisableByDescriptor(mspDescriptor_t desc)
 {
-    escEnablePassthrough(serialPort, &motorConfig()->dev, escPortIndex, escMode);
+    mspArmingDisableFlags |= (1 << desc);
 }
 #endif
 
-static void mspFc4waySerialCommand(sbuf_t *dst, sbuf_t *src, mspPostProcessFnPtr *mspPostProcessFn)
+static void mspArmingEnableByDescriptor(mspDescriptor_t desc)
+{
+    mspArmingDisableFlags &= ~(1 << desc);
+}
+
+static bool mspIsMspArmingEnabled(void)
+{
+    return mspArmingDisableFlags == 0;
+}
+
+#define MSP_PASSTHROUGH_ESC_4WAY 0xff
+
+static uint8_t mspPassthroughMode;
+static uint8_t mspPassthroughArgument;
+
+#if defined(USE_ESCSERIAL) && defined(USE_SERIAL_4WAY_BLHELI_INTERFACE)
+static void mspEscPassthroughFn(serialPort_t *serialPort)
+{
+    escEnablePassthrough(serialPort, &motorConfig()->dev, mspPassthroughArgument, mspPassthroughMode);
+}
+#endif
+
+static serialPort_t *mspFindPassthroughSerialPort(void)
+{
+    serialPortUsage_t *portUsage = NULL;
+
+    switch (mspPassthroughMode) {
+    case MSP_PASSTHROUGH_SERIAL_ID:
+    {
+        portUsage = findSerialPortUsageByIdentifier(mspPassthroughArgument);
+        break;
+    }
+    case MSP_PASSTHROUGH_SERIAL_FUNCTION_ID:
+    {
+        const serialPortConfig_t *portConfig = findSerialPortConfig(1 << mspPassthroughArgument);
+        if (portConfig) {
+            portUsage = findSerialPortUsageByIdentifier(portConfig->identifier);
+        }
+        break;
+    }
+    }
+    return portUsage ? portUsage->serialPort : NULL;
+}
+
+static void mspSerialPassthroughFn(serialPort_t *serialPort)
+{
+    serialPort_t *passthroughPort = mspFindPassthroughSerialPort();
+    if (passthroughPort && serialPort) {
+        serialPassthrough(passthroughPort, serialPort, NULL, NULL);
+    }
+}
+
+static void mspFcSetPassthroughCommand(sbuf_t *dst, sbuf_t *src, mspPostProcessFnPtr *mspPostProcessFn)
 {
     const unsigned int dataSize = sbufBytesRemaining(src);
     if (dataSize == 0) {
         // Legacy format
-
-        escMode = ESC_4WAY;
+        mspPassthroughMode = MSP_PASSTHROUGH_ESC_4WAY;
     } else {
-        escMode = sbufReadU8(src);
-        escPortIndex = sbufReadU8(src);
+        mspPassthroughMode = sbufReadU8(src);
+        mspPassthroughArgument = sbufReadU8(src);
     }
 
-    switch (escMode) {
-    case ESC_4WAY:
+    switch (mspPassthroughMode) {
+    case MSP_PASSTHROUGH_SERIAL_ID:
+    case MSP_PASSTHROUGH_SERIAL_FUNCTION_ID:
+        if (mspFindPassthroughSerialPort()) {
+            if (mspPostProcessFn) {
+                *mspPostProcessFn = mspSerialPassthroughFn;
+            }
+            sbufWriteU8(dst, 1);
+        } else {
+            sbufWriteU8(dst, 0);
+        }
+        break;
+#ifdef USE_SERIAL_4WAY_BLHELI_INTERFACE
+    case MSP_PASSTHROUGH_ESC_4WAY:
         // get channel number
         // switch all motor lines HI
         // reply with the count of ESC found
@@ -235,12 +317,12 @@ static void mspFc4waySerialCommand(sbuf_t *dst, sbuf_t *src, mspPostProcessFnPtr
         break;
 
 #ifdef USE_ESCSERIAL
-    case PROTOCOL_SIMONK:
-    case PROTOCOL_BLHELI:
-    case PROTOCOL_KISS:
-    case PROTOCOL_KISSALL:
-    case PROTOCOL_CASTLE:
-        if (escPortIndex < getMotorCount() || (escMode == PROTOCOL_KISS && escPortIndex == ALL_MOTORS)) {
+    case MSP_PASSTHROUGH_ESC_SIMONK:
+    case MSP_PASSTHROUGH_ESC_BLHELI:
+    case MSP_PASSTHROUGH_ESC_KISS:
+    case MSP_PASSTHROUGH_ESC_KISSALL:
+    case MSP_PASSTHROUGH_ESC_CASTLE:
+        if (mspPassthroughArgument < getMotorCount() || (mspPassthroughMode == MSP_PASSTHROUGH_ESC_KISS && mspPassthroughArgument == ALL_MOTORS)) {
             sbufWriteU8(dst, 1);
 
             if (mspPostProcessFn) {
@@ -250,12 +332,12 @@ static void mspFc4waySerialCommand(sbuf_t *dst, sbuf_t *src, mspPostProcessFnPtr
             break;
         }
         FALLTHROUGH;
-#endif
+#endif // USE_ESCSERIAL
+#endif // USE_SERIAL_4WAY_BLHELI_INTERFACE
     default:
         sbufWriteU8(dst, 0);
     }
 }
-#endif //USE_SERIAL_4WAY_BLHELI_INTERFACE
 
 // TODO: Remove the pragma once this is called from unconditional code
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -309,6 +391,48 @@ static void mspRebootFn(serialPort_t *serialPort)
     // control should never return here.
     while (true) ;
 }
+
+#define MSP_DISPATCH_DELAY_US 1000000
+
+void mspReboot(dispatchEntry_t* self)
+{
+    UNUSED(self);
+
+    if (ARMING_FLAG(ARMED)) {
+        return;
+    }
+
+    mspRebootFn(NULL);
+}
+
+dispatchEntry_t mspRebootEntry =
+{
+    mspReboot, 0, NULL, false
+};
+
+void writeReadEeprom(dispatchEntry_t* self)
+{
+    UNUSED(self);
+
+    if (ARMING_FLAG(ARMED)) {
+        return;
+    }
+
+    writeEEPROM();
+    readEEPROM();
+
+#ifdef USE_VTX_TABLE
+    if (vtxTableNeedsInit) {
+        vtxTableNeedsInit = false;
+        vtxTableInit();  // Reinitialize and refresh the in-memory copies
+    }
+#endif
+}
+
+dispatchEntry_t writeReadEepromEntry =
+{
+    writeReadEeprom, 0, NULL, false
+};
 
 static void serializeSDCardSummaryReply(sbuf_t *dst)
 {
@@ -449,7 +573,8 @@ static void serializeDataflashReadReply(sbuf_t *dst, uint32_t address, const uin
 #ifdef USE_HUFFMAN
         // compress in 256-byte chunks
         const uint16_t READ_BUFFER_SIZE = 256;
-        uint8_t readBuffer[READ_BUFFER_SIZE];
+        // This may be DMAable, so make it cache aligned
+        __attribute__ ((aligned(32))) uint8_t readBuffer[READ_BUFFER_SIZE];
 
         huffmanState_t state = {
             .bytesWritten = 0,
@@ -493,7 +618,7 @@ static void serializeDataflashReadReply(sbuf_t *dst, uint32_t address, const uin
  * Returns true if the command was processd, false otherwise.
  * May set mspPostProcessFunc to a function to be called once the command has been processed
  */
-static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProcessFnPtr *mspPostProcessFn)
+static bool mspCommonProcessOutCommand(int16_t cmdMSP, sbuf_t *dst, mspPostProcessFnPtr *mspPostProcessFn)
 {
     UNUSED(mspPostProcessFn);
 
@@ -527,31 +652,26 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
 #else
         sbufWriteU8(dst, 0);  // 0 == FC
 #endif
+
         // Target capabilities (uint8)
-#define TARGET_HAS_VCP_BIT 0
-#define TARGET_HAS_SOFTSERIAL_BIT 1
-#define TARGET_IS_UNIFIED_BIT 2
-#define TARGET_HAS_FLASH_BOOTLOADER_BIT 3
-#define TARGET_SUPPORTS_CUSTOM_DEFAULTS_BIT 4
-#define TARGET_HAS_CUSTOM_DEFAULTS_BIT 5
+#define TARGET_HAS_VCP 0
+#define TARGET_HAS_SOFTSERIAL 1
+#define TARGET_HAS_FLASH_BOOTLOADER 3
+#define TARGET_SUPPORTS_RX_BIND 6
 
         uint8_t targetCapabilities = 0;
 #ifdef USE_VCP
-        targetCapabilities |= 1 << TARGET_HAS_VCP_BIT;
+        targetCapabilities |= BIT(TARGET_HAS_VCP);
 #endif
-#if defined(USE_SOFTSERIAL1) || defined(USE_SOFTSERIAL2)
-        targetCapabilities |= 1 << TARGET_HAS_SOFTSERIAL_BIT;
-#endif
-#if defined(USE_UNIFIED_TARGET)
-        targetCapabilities |= 1 << TARGET_IS_UNIFIED_BIT;
+#if defined(USE_SOFTSERIAL)
+        targetCapabilities |= BIT(TARGET_HAS_SOFTSERIAL);
 #endif
 #if defined(USE_FLASH_BOOT_LOADER)
-        targetCapabilities |= 1 << TARGET_HAS_FLASH_BOOTLOADER_BIT;
+        targetCapabilities |= BIT(TARGET_HAS_FLASH_BOOTLOADER);
 #endif
-#if defined(USE_CUSTOM_DEFAULTS)
-        targetCapabilities |= 1 << TARGET_SUPPORTS_CUSTOM_DEFAULTS_BIT;
-        if (hasCustomDefaults()) {
-            targetCapabilities |= 1 << TARGET_HAS_CUSTOM_DEFAULTS_BIT;
+#if defined(USE_RX_BIND)
+        if (getRxBindSupported()) {
+            targetCapabilities |= BIT(TARGET_SUPPORTS_RX_BIND);
         }
 #endif
 
@@ -585,10 +705,43 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
         sbufWriteData(dst, &emptySignature, sizeof(emptySignature));
 #endif
 
-        sbufWriteU8(dst, MCU_TYPE_ID);
+        sbufWriteU8(dst, getMcuTypeId());
 
         // Added in API version 1.42
         sbufWriteU8(dst, systemConfig()->configurationState);
+
+        // Added in API version 1.43
+        sbufWriteU16(dst, gyro.sampleRateHz); // informational so the configurator can display the correct gyro/pid frequencies in the drop-down
+
+        // Configuration warnings / problems (uint32_t)
+#define PROBLEM_ACC_NEEDS_CALIBRATION 0
+#define PROBLEM_MOTOR_PROTOCOL_DISABLED 1
+
+        uint32_t configurationProblems = 0;
+
+#if defined(USE_ACC)
+        if (!accHasBeenCalibrated()) {
+            configurationProblems |= BIT(PROBLEM_ACC_NEEDS_CALIBRATION);
+        }
+#endif
+
+        if (!checkMotorProtocolEnabled(&motorConfig()->dev, NULL)) {
+            configurationProblems |= BIT(PROBLEM_MOTOR_PROTOCOL_DISABLED);
+        }
+
+        sbufWriteU32(dst, configurationProblems);
+
+        // Added in MSP API 1.44
+#if defined(USE_SPI)
+        sbufWriteU8(dst, spiGetRegisteredDeviceCount());
+#else
+        sbufWriteU8(dst, 0);
+#endif
+#if defined(USE_I2C)
+        sbufWriteU8(dst, i2cGetRegisteredDeviceCount());
+#else
+        sbufWriteU8(dst, 0);
+#endif
 
         break;
     }
@@ -597,6 +750,8 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
         sbufWriteData(dst, buildDate, BUILD_DATE_LENGTH);
         sbufWriteData(dst, buildTime, BUILD_TIME_LENGTH);
         sbufWriteData(dst, shortGitRevision, GIT_SHORT_REVISION_LENGTH);
+        // Added in API version 1.46
+        sbufWriteBuildInfoFlags(dst);
         break;
 
     case MSP_ANALOG:
@@ -620,7 +775,7 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
         break;
 
     case MSP_FEATURE_CONFIG:
-        sbufWriteU32(dst, getFeatureMask());
+        sbufWriteU32(dst, featureConfig()->enabledFeatures);
         break;
 
 #ifdef USE_BEEPER
@@ -662,7 +817,7 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
             voltageMeterRead(id, &meter);
 
             sbufWriteU8(dst, id);
-            sbufWriteU8(dst, (uint8_t)constrain((meter.filtered + 5) / 10, 0, 255));
+            sbufWriteU8(dst, (uint8_t)constrain((meter.displayFiltered + 5) / 10, 0, 255));
         }
         break;
     }
@@ -778,31 +933,58 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
         break;
     }
 
+#if defined(USE_OSD)
     case MSP_OSD_CONFIG: {
 #define OSD_FLAGS_OSD_FEATURE           (1 << 0)
 //#define OSD_FLAGS_OSD_SLAVE             (1 << 1)
 #define OSD_FLAGS_RESERVED_1            (1 << 2)
-#define OSD_FLAGS_RESERVED_2            (1 << 3)
+#define OSD_FLAGS_OSD_HARDWARE_FRSKYOSD (1 << 3)
 #define OSD_FLAGS_OSD_HARDWARE_MAX_7456 (1 << 4)
+#define OSD_FLAGS_OSD_DEVICE_DETECTED   (1 << 5)
+#define OSD_FLAGS_OSD_MSP_DEVICE        (1 << 6)
 
         uint8_t osdFlags = 0;
-#if defined(USE_OSD)
+
         osdFlags |= OSD_FLAGS_OSD_FEATURE;
-#endif
-#ifdef USE_MAX7456
-        osdFlags |= OSD_FLAGS_OSD_HARDWARE_MAX_7456;
-#endif
+
+        osdDisplayPortDevice_e deviceType;
+        displayPort_t *osdDisplayPort = osdGetDisplayPort(&deviceType);
+        bool displayIsReady = osdDisplayPort && displayCheckReady(osdDisplayPort, true);
+        switch (deviceType) {
+        case OSD_DISPLAYPORT_DEVICE_MAX7456:
+            osdFlags |= OSD_FLAGS_OSD_HARDWARE_MAX_7456;
+            if (displayIsReady) {
+                osdFlags |= OSD_FLAGS_OSD_DEVICE_DETECTED;
+            }
+
+            break;
+        case OSD_DISPLAYPORT_DEVICE_FRSKYOSD:
+            osdFlags |= OSD_FLAGS_OSD_HARDWARE_FRSKYOSD;
+            if (displayIsReady) {
+                osdFlags |= OSD_FLAGS_OSD_DEVICE_DETECTED;
+            }
+
+            break;
+        case OSD_DISPLAYPORT_DEVICE_MSP:
+            osdFlags |= OSD_FLAGS_OSD_MSP_DEVICE;
+            if (displayIsReady) {
+                osdFlags |= OSD_FLAGS_OSD_DEVICE_DETECTED;
+            }
+
+            break;
+        default:
+            break;
+        }
 
         sbufWriteU8(dst, osdFlags);
 
-#ifdef USE_MAX7456
-        // send video system (AUTO/PAL/NTSC)
+#ifdef USE_OSD_SD
+        // send video system (AUTO/PAL/NTSC/HD)
         sbufWriteU8(dst, vcdProfile()->video_system);
 #else
-        sbufWriteU8(dst, 0);
-#endif
+        sbufWriteU8(dst, VIDEO_SYSTEM_HD);
+#endif // USE_OSD_SD
 
-#ifdef USE_OSD
         // OSD specific, not applicable to OSD slaves.
 
         // Configuration
@@ -820,7 +1002,7 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
 
         // Element position and visibility
         for (int i = 0; i < OSD_ITEM_COUNT; i++) {
-            sbufWriteU16(dst, osdConfig()->item_pos[i]);
+            sbufWriteU16(dst, osdElementConfig()->item_pos[i]);
         }
 
         // Post flight statistics
@@ -860,7 +1042,26 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
         sbufWriteU8(dst, 0);
 #endif // USE_OSD_STICK_OVERLAY
 
+        // API >= 1.43
+        // Add the camera frame element width/height
+        sbufWriteU8(dst, osdConfig()->camera_frame_width);
+        sbufWriteU8(dst, osdConfig()->camera_frame_height);
+
+        // API >= 1.46
+        sbufWriteU16(dst, osdConfig()->link_quality_alarm);
+
+        // API >= 1.47
+        sbufWriteU16(dst, osdConfig()->rssi_dbm_alarm);
+
+        break;
+    }
 #endif // USE_OSD
+
+    case MSP_OSD_CANVAS: {
+#ifdef USE_OSD
+        sbufWriteU8(dst, osdConfig()->canvas_cols);
+        sbufWriteU8(dst, osdConfig()->canvas_rows);
+#endif
         break;
     }
 
@@ -870,9 +1071,13 @@ static bool mspCommonProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst, mspPostProce
     return true;
 }
 
-static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
+static bool mspProcessOutCommand(mspDescriptor_t srcDesc, int16_t cmdMSP, sbuf_t *dst)
 {
     bool unsupportedCommand = false;
+
+#if !defined(USE_VTX_COMMON) || !defined(USE_VTX_MSP)
+    UNUSED(srcDesc);
+#endif
 
     switch (cmdMSP) {
     case MSP_STATUS_EX:
@@ -881,7 +1086,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
             boxBitmask_t flightModeFlags;
             const int flagBits = packFlightModeFlags(&flightModeFlags);
 
-            sbufWriteU16(dst, getTaskDeltaTime(TASK_GYROPID));
+            sbufWriteU16(dst, getTaskDeltaTimeUs(TASK_PID));
 #ifdef USE_I2C
             sbufWriteU16(dst, i2cGetErrorCounter());
 #else
@@ -890,7 +1095,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
             sbufWriteU16(dst, sensors(SENSOR_ACC) | sensors(SENSOR_BARO) << 1 | sensors(SENSOR_MAG) << 2 | sensors(SENSOR_GPS) << 3 | sensors(SENSOR_RANGEFINDER) << 4 | sensors(SENSOR_GYRO) << 5);
             sbufWriteData(dst, &flightModeFlags, 4);        // unconditional part of flags, first 32 bits
             sbufWriteU8(dst, getCurrentPidProfileIndex());
-            sbufWriteU16(dst, constrain(averageSystemLoadPercent, 0, 100));
+            sbufWriteU16(dst, constrain(getAverageSystemLoadPercent(), 0, LOAD_PERCENTAGE_ONE));
             if (cmdMSP == MSP_STATUS_EX) {
                 sbufWriteU8(dst, PID_PROFILE_COUNT);
                 sbufWriteU8(dst, getCurrentControlRateProfileIndex());
@@ -915,29 +1120,23 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
             // config state flags - bits to indicate the state of the configuration, reboot required, etc.
             // other flags can be added as needed
             sbufWriteU8(dst, (getRebootRequired() << 0));
+
+            // Added in API version 1.46
+            // Write CPU temp
+#ifdef USE_ADC_INTERNAL
+            sbufWriteU16(dst, getCoreTemperatureCelsius());
+#else
+            sbufWriteU16(dst, 0);
+#endif
         }
         break;
 
     case MSP_RAW_IMU:
         {
-#if defined(USE_ACC)
-            // Hack scale due to choice of units for sensor data in multiwii
-
-            uint8_t scale;
-            if (acc.dev.acc_1G > 512 * 4) {
-                scale = 8;
-            } else if (acc.dev.acc_1G > 512 * 2) {
-                scale = 4;
-            } else if (acc.dev.acc_1G >= 512) {
-                scale = 2;
-            } else {
-                scale = 1;
-            }
-#endif
 
             for (int i = 0; i < 3; i++) {
 #if defined(USE_ACC)
-                sbufWriteU16(dst, lrintf(acc.accADC[i] / scale));
+                sbufWriteU16(dst, lrintf(acc.accADC.v[i]));
 #else
                 sbufWriteU16(dst, 0);
 #endif
@@ -946,16 +1145,20 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
                 sbufWriteU16(dst, gyroRateDps(i));
             }
             for (int i = 0; i < 3; i++) {
-                sbufWriteU16(dst, lrintf(mag.magADC[i]));
+#if defined(USE_MAG)
+                sbufWriteU16(dst, lrintf(mag.magADC.v[i]));
+#else
+                sbufWriteU16(dst, 0);
+#endif
             }
         }
         break;
 
-    case MSP_NAME:
+case MSP_NAME:
         {
-            const int nameLen = strlen(pilotConfig()->name);
+            const int nameLen = strlen(pilotConfig()->craftName);
             for (int i = 0; i < nameLen; i++) {
-                sbufWriteU8(dst, pilotConfig()->name[i]);
+                sbufWriteU8(dst, pilotConfig()->craftName[i]);
             }
         }
         break;
@@ -1018,15 +1221,36 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
             bool rpmDataAvailable = false;
 
 #ifdef USE_DSHOT_TELEMETRY
-            if (motorConfig()->dev.useDshotTelemetry) {
-                rpm = (int)getDshotTelemetry(i) * 100 * 2 / motorConfig()->motorPoleCount;
+            if (useDshotTelemetry) {
+                rpm = lrintf(getDshotRpm(i));
                 rpmDataAvailable = true;
                 invalidPct = 10000; // 100.00%
+
+
 #ifdef USE_DSHOT_TELEMETRY_STATS
                 if (isDshotMotorTelemetryActive(i)) {
                     invalidPct = getDshotTelemetryMotorInvalidPercent(i);
                 }
 #endif
+
+
+                // Provide extended dshot telemetry
+                if ((dshotTelemetryState.motorState[i].telemetryTypes & DSHOT_EXTENDED_TELEMETRY_MASK) != 0) {
+                    // Temperature Celsius [0, 1, ..., 255] in degree Celsius, just like Blheli_32 and KISS
+                    if ((dshotTelemetryState.motorState[i].telemetryTypes & (1 << DSHOT_TELEMETRY_TYPE_TEMPERATURE)) != 0) {
+                        escTemperature = dshotTelemetryState.motorState[i].telemetryData[DSHOT_TELEMETRY_TYPE_TEMPERATURE];
+                    }
+
+                    // Current -> 0-255A step 1A
+                    if ((dshotTelemetryState.motorState[i].telemetryTypes & (1 << DSHOT_TELEMETRY_TYPE_CURRENT)) != 0) {
+                        escCurrent = dshotTelemetryState.motorState[i].telemetryData[DSHOT_TELEMETRY_TYPE_CURRENT];
+                    }
+
+                    // Voltage -> 0-63,75V step 0,25V
+                    if ((dshotTelemetryState.motorState[i].telemetryTypes & (1 << DSHOT_TELEMETRY_TYPE_VOLTAGE)) != 0) {
+                        escVoltage = dshotTelemetryState.motorState[i].telemetryData[DSHOT_TELEMETRY_TYPE_VOLTAGE] >> 2;
+                    }
+                }
             }
 #endif
 
@@ -1034,7 +1258,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
             if (featureIsEnabled(FEATURE_ESC_SENSOR)) {
                 escSensorData_t *escData = getEscSensorData(i);
                 if (!rpmDataAvailable) {  // We want DSHOT telemetry RPM data (if available) to have precedence
-                    rpm = calcEscRpm(escData->rpm);
+                    rpm = lrintf(erpmToRpm(escData->rpm));
                     rpmDataAvailable = true;
                 }
                 escTemperature = escData->temperature;
@@ -1053,8 +1277,49 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         }
         break;
 
+    case MSP2_MOTOR_OUTPUT_REORDERING:
+        {
+            sbufWriteU8(dst, MAX_SUPPORTED_MOTORS);
+
+            for (unsigned i = 0; i < MAX_SUPPORTED_MOTORS; i++) {
+                sbufWriteU8(dst, motorConfig()->dev.motorOutputReordering[i]);
+            }
+        }
+        break;
+
+#ifdef USE_VTX_COMMON
+    case MSP2_GET_VTX_DEVICE_STATUS:
+        {
+            const vtxDevice_t *vtxDevice = vtxCommonDevice();
+            vtxCommonSerializeDeviceStatus(vtxDevice, dst);
+        }
+        break;
+#endif
+
+#ifdef USE_OSD
+    case MSP2_GET_OSD_WARNINGS:
+        {
+            bool isBlinking;
+            uint8_t displayAttr;
+            char warningsBuffer[OSD_FORMAT_MESSAGE_BUFFER_SIZE];
+
+            renderOsdWarning(warningsBuffer, &isBlinking, &displayAttr);
+            const uint8_t warningsLen = strlen(warningsBuffer);
+
+            if (isBlinking) {
+                displayAttr |= DISPLAYPORT_BLINK;
+            }
+            sbufWriteU8(dst, displayAttr);  // see displayPortSeverity_e
+            sbufWriteU8(dst, warningsLen);  // length byte followed by the actual characters
+            for (unsigned i = 0; i < warningsLen; i++) {
+                sbufWriteU8(dst, warningsBuffer[i]);
+            }
+            break;
+        }
+#endif
+
     case MSP_RC:
-        for (int i = 0; i < rxRuntimeConfig.channelCount; i++) {
+        for (int i = 0; i < rxRuntimeState.channelCount; i++) {
             sbufWriteU16(dst, rcData[i]);
         }
         break;
@@ -1066,11 +1331,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         break;
 
     case MSP_ALTITUDE:
-#if defined(USE_BARO) || defined(USE_RANGEFINDER)
         sbufWriteU32(dst, getEstimatedAltitudeCm());
-#else
-        sbufWriteU32(dst, 0);
-#endif
 #ifdef USE_VARIO
         sbufWriteU16(dst, getEstimatedVario());
 #else
@@ -1096,6 +1357,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, armingConfig()->auto_disarm_delay);
         sbufWriteU8(dst, 0);
         sbufWriteU8(dst, imuConfig()->small_angle);
+        sbufWriteU8(dst, armingConfig()->gyro_cal_on_first_arm);
         break;
 
     case MSP_RC_TUNING:
@@ -1104,10 +1366,10 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         for (int i = 0 ; i < 3; i++) {
             sbufWriteU8(dst, currentControlRateProfile->rates[i]); // R,P,Y see flight_dynamics_index_t
         }
-        sbufWriteU8(dst, currentControlRateProfile->dynThrPID);
+        sbufWriteU8(dst, 0);   // was currentControlRateProfile->tpa_rate
         sbufWriteU8(dst, currentControlRateProfile->thrMid8);
         sbufWriteU8(dst, currentControlRateProfile->thrExpo8);
-        sbufWriteU16(dst, currentControlRateProfile->tpa_breakpoint);
+        sbufWriteU16(dst, 0);   // was currentControlRateProfile->tpa_breakpoint
         sbufWriteU8(dst, currentControlRateProfile->rcExpo[FD_YAW]);
         sbufWriteU8(dst, currentControlRateProfile->rcRates[FD_YAW]);
         sbufWriteU8(dst, currentControlRateProfile->rcRates[FD_PITCH]);
@@ -1121,6 +1383,9 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, currentControlRateProfile->rate_limit[FD_ROLL]);
         sbufWriteU16(dst, currentControlRateProfile->rate_limit[FD_PITCH]);
         sbufWriteU16(dst, currentControlRateProfile->rate_limit[FD_YAW]);
+
+        // added in 1.43
+        sbufWriteU8(dst, currentControlRateProfile->rates_type);
 
         break;
 
@@ -1187,7 +1452,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, getMotorCount());
         sbufWriteU8(dst, motorConfig()->motorPoleCount);
 #ifdef USE_DSHOT_TELEMETRY
-        sbufWriteU8(dst, motorConfig()->dev.useDshotTelemetry);
+        sbufWriteU8(dst, useDshotTelemetry);
 #else
         sbufWriteU8(dst, 0);
 #endif
@@ -1201,13 +1466,13 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 
 #ifdef USE_MAG
     case MSP_COMPASS_CONFIG:
-        sbufWriteU16(dst, compassConfig()->mag_declination / 10);
+        sbufWriteU16(dst, imuConfig()->mag_declination);
         break;
 #endif
-
-#if defined(USE_ESC_SENSOR)
     // Deprecated in favor of MSP_MOTOR_TELEMETY as of API version 1.42
+    // Used by DJI FPV
     case MSP_ESC_SENSOR_DATA:
+#if defined(USE_ESC_SENSOR)
         if (featureIsEnabled(FEATURE_ESC_SENSOR)) {
             sbufWriteU8(dst, getMotorCount());
             for (int i = 0; i < getMotorCount(); i++) {
@@ -1215,12 +1480,23 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
                 sbufWriteU8(dst, escData->temperature);
                 sbufWriteU16(dst, escData->rpm);
             }
-        } else {
+        } else
+#endif
+#if defined(USE_DSHOT_TELEMETRY)
+        if (useDshotTelemetry) {
+            sbufWriteU8(dst, getMotorCount());
+            for (int i = 0; i < getMotorCount(); i++) {
+                sbufWriteU8(dst, dshotTelemetryState.motorState[i].telemetryData[DSHOT_TELEMETRY_TYPE_TEMPERATURE]);
+                sbufWriteU16(dst, lrintf(getDshotRpm(i)));
+            }
+        }
+        else
+#endif
+        {
             unsupportedCommand = true;
         }
 
         break;
-#endif
 
 #ifdef USE_GPS
     case MSP_GPS_CONFIG:
@@ -1228,6 +1504,9 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, gpsConfig()->sbasMode);
         sbufWriteU8(dst, gpsConfig()->autoConfig);
         sbufWriteU8(dst, gpsConfig()->autoBaud);
+        // Added in API version 1.43
+        sbufWriteU8(dst, gpsConfig()->gps_set_home_point_once);
+        sbufWriteU8(dst, gpsConfig()->gps_ublox_use_galileo);
         break;
 
     case MSP_RAW_GPS:
@@ -1238,11 +1517,13 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, (uint16_t)constrain(gpsSol.llh.altCm / 100, 0, UINT16_MAX)); // alt changed from 1m to 0.01m per lsb since MSP API 1.39 by RTH. To maintain backwards compatibility compensate to 1m per lsb in MSP again.
         sbufWriteU16(dst, gpsSol.groundSpeed);
         sbufWriteU16(dst, gpsSol.groundCourse);
+        // Added in API version 1.44
+        sbufWriteU16(dst, gpsSol.dop.pdop);
         break;
 
     case MSP_COMP_GPS:
         sbufWriteU16(dst, GPS_distanceToHome);
-        sbufWriteU16(dst, GPS_directionToHome);
+        sbufWriteU16(dst, GPS_directionToHome / 10); // resolution increased in Betaflight 4.4 by factor of 10, this maintains backwards compatibility for DJI OSD
         sbufWriteU8(dst, GPS_update & 1);
         break;
 
@@ -1258,15 +1539,25 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 
 #ifdef USE_GPS_RESCUE
     case MSP_GPS_RESCUE:
-        sbufWriteU16(dst, gpsRescueConfig()->angle);
-        sbufWriteU16(dst, gpsRescueConfig()->initialAltitudeM);
+        sbufWriteU16(dst, gpsRescueConfig()->maxRescueAngle);
+        sbufWriteU16(dst, gpsRescueConfig()->returnAltitudeM);
         sbufWriteU16(dst, gpsRescueConfig()->descentDistanceM);
-        sbufWriteU16(dst, gpsRescueConfig()->rescueGroundspeed);
+        sbufWriteU16(dst, gpsRescueConfig()->groundSpeedCmS);
         sbufWriteU16(dst, gpsRescueConfig()->throttleMin);
         sbufWriteU16(dst, gpsRescueConfig()->throttleMax);
-        sbufWriteU16(dst, gpsRescueConfig()->throttleHover);
+        sbufWriteU16(dst, positionConfig()->hover_throttle);
         sbufWriteU8(dst,  gpsRescueConfig()->sanityChecks);
         sbufWriteU8(dst,  gpsRescueConfig()->minSats);
+
+        // Added in API version 1.43
+        sbufWriteU16(dst, gpsRescueConfig()->ascendRate);
+        sbufWriteU16(dst, gpsRescueConfig()->descendRate);
+        sbufWriteU8(dst, gpsRescueConfig()->allowArmingWithoutFix);
+        sbufWriteU8(dst, gpsRescueConfig()->altitudeMode);
+        // Added in API version 1.44
+        sbufWriteU16(dst, gpsRescueConfig()->minStartDistM);
+        // Added in API version 1.46
+        sbufWriteU16(dst, gpsRescueConfig()->initialClimbM);
         break;
 
     case MSP_GPS_RESCUE_PIDS:
@@ -1301,8 +1592,8 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, rxConfig()->spektrum_sat_bind);
         sbufWriteU16(dst, rxConfig()->rx_min_usec);
         sbufWriteU16(dst, rxConfig()->rx_max_usec);
-        sbufWriteU8(dst, rxConfig()->rcInterpolation);
-        sbufWriteU8(dst, rxConfig()->rcInterpolationInterval);
+        sbufWriteU8(dst, 0); // not required in API 1.44, was rxConfig()->rcInterpolation
+        sbufWriteU8(dst, 0); // not required in API 1.44, was rxConfig()->rcInterpolationInterval
         sbufWriteU16(dst, rxConfig()->airModeActivateThreshold * 10 + 1000);
 #ifdef USE_RX_SPI
         sbufWriteU8(dst, rxSpiConfig()->rx_spi_protocol);
@@ -1314,13 +1605,13 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, 0);
 #endif
         sbufWriteU8(dst, rxConfig()->fpvCamAngleDegrees);
-        sbufWriteU8(dst, rxConfig()->rcInterpolationChannels);
+        sbufWriteU8(dst, 0); // not required in API 1.44, was rxConfig()->rcSmoothingChannels
 #if defined(USE_RC_SMOOTHING_FILTER)
-        sbufWriteU8(dst, rxConfig()->rc_smoothing_type);
-        sbufWriteU8(dst, rxConfig()->rc_smoothing_input_cutoff);
-        sbufWriteU8(dst, rxConfig()->rc_smoothing_derivative_cutoff);
-        sbufWriteU8(dst, rxConfig()->rc_smoothing_input_type);
-        sbufWriteU8(dst, rxConfig()->rc_smoothing_derivative_type);
+        sbufWriteU8(dst, 0); // not required in API 1.44, was rxConfig()->rc_smoothing_type
+        sbufWriteU8(dst, rxConfig()->rc_smoothing_setpoint_cutoff);
+        sbufWriteU8(dst, rxConfig()->rc_smoothing_feedforward_cutoff);
+        sbufWriteU8(dst, 0); // not required in API 1.44, was rxConfig()->rc_smoothing_input_type
+        sbufWriteU8(dst, 0); // not required in API 1.44, was rxConfig()->rc_smoothing_derivative_type
 #else
         sbufWriteU8(dst, 0);
         sbufWriteU8(dst, 0);
@@ -1335,14 +1626,35 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 #endif
         // Added in MSP API 1.42
 #if defined(USE_RC_SMOOTHING_FILTER)
-        sbufWriteU8(dst, rxConfig()->rc_smoothing_auto_factor);
+        sbufWriteU8(dst, rxConfig()->rc_smoothing_auto_factor_rpy);
+#else
+        sbufWriteU8(dst, 0);
+#endif
+        // Added in MSP API 1.44
+#if defined(USE_RC_SMOOTHING_FILTER)
+        sbufWriteU8(dst, rxConfig()->rc_smoothing_mode);
+#else
+        sbufWriteU8(dst, 0);
+#endif
+
+        // Added in MSP API 1.45
+#ifdef USE_RX_EXPRESSLRS
+        sbufWriteData(dst, rxExpressLrsSpiConfig()->UID, sizeof(rxExpressLrsSpiConfig()->UID));
+#else
+        uint8_t emptyUid[6];
+        memset(emptyUid, 0, sizeof(emptyUid));
+        sbufWriteData(dst, &emptyUid, sizeof(emptyUid));
+#endif
+        // Added in MSP API 1.47
+#ifdef USE_RX_EXPRESSLRS
+        sbufWriteU8(dst, rxExpressLrsSpiConfig()->modelId);
 #else
         sbufWriteU8(dst, 0);
 #endif
         break;
     case MSP_FAILSAFE_CONFIG:
         sbufWriteU8(dst, failsafeConfig()->failsafe_delay);
-        sbufWriteU8(dst, failsafeConfig()->failsafe_off_delay);
+        sbufWriteU8(dst, failsafeConfig()->failsafe_landing_time);
         sbufWriteU16(dst, failsafeConfig()->failsafe_throttle);
         sbufWriteU8(dst, failsafeConfig()->failsafe_switch_mode);
         sbufWriteU16(dst, failsafeConfig()->failsafe_throttle_low_delay);
@@ -1350,7 +1662,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         break;
 
     case MSP_RXFAIL_CONFIG:
-        for (int i = 0; i < rxRuntimeConfig.channelCount; i++) {
+        for (int i = 0; i < rxRuntimeState.channelCount; i++) {
             sbufWriteU8(dst, rxFailsafeChannelConfigs(i)->mode);
             sbufWriteU16(dst, RXFAIL_STEP_TO_CHANNEL_VALUE(rxFailsafeChannelConfigs(i)->step));
         }
@@ -1377,6 +1689,27 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
             sbufWriteU8(dst, serialConfig()->portConfigs[i].blackbox_baudrateIndex);
         }
         break;
+    case MSP2_COMMON_SERIAL_CONFIG: {
+        uint8_t count = 0;
+        for (int i = 0; i < SERIAL_PORT_COUNT; i++) {
+            if (serialIsPortAvailable(serialConfig()->portConfigs[i].identifier)) {
+                count++;
+            }
+        }
+        sbufWriteU8(dst, count);
+        for (int i = 0; i < SERIAL_PORT_COUNT; i++) {
+            if (!serialIsPortAvailable(serialConfig()->portConfigs[i].identifier)) {
+                continue;
+            };
+            sbufWriteU8(dst, serialConfig()->portConfigs[i].identifier);
+            sbufWriteU32(dst, serialConfig()->portConfigs[i].functionMask);
+            sbufWriteU8(dst, serialConfig()->portConfigs[i].msp_baudrateIndex);
+            sbufWriteU8(dst, serialConfig()->portConfigs[i].gps_baudrateIndex);
+            sbufWriteU8(dst, serialConfig()->portConfigs[i].telemetry_baudrateIndex);
+            sbufWriteU8(dst, serialConfig()->portConfigs[i].blackbox_baudrateIndex);
+        }
+        break;
+    }
 
 #ifdef USE_LED_STRIP_STATUS_MODE
     case MSP_LED_COLORS:
@@ -1391,7 +1724,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 
 #ifdef USE_LED_STRIP
     case MSP_LED_STRIP_CONFIG:
-        for (int i = 0; i < LED_MAX_STRIP_LENGTH; i++) {
+        for (int i = 0; i < LED_STRIP_MAX_LENGTH; i++) {
 #ifdef USE_LED_STRIP_STATUS_MODE
             const ledConfig_t *ledConfig = &ledStripStatusModeConfig()->ledConfigs[i];
             sbufWriteU32(dst, *ledConfig);
@@ -1444,13 +1777,19 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, blackboxConfig()->device);
         sbufWriteU8(dst, 1); // Rate numerator, not used anymore
         sbufWriteU8(dst, blackboxGetRateDenom());
-        sbufWriteU16(dst, blackboxConfig()->p_ratio);
+        sbufWriteU16(dst, blackboxGetPRatio());
+        sbufWriteU8(dst, blackboxConfig()->sample_rate);
+        // Added in MSP API 1.45
+        sbufWriteU32(dst, blackboxConfig()->fields_disabled_mask);
 #else
         sbufWriteU8(dst, 0); // Blackbox not supported
         sbufWriteU8(dst, 0);
         sbufWriteU8(dst, 0);
         sbufWriteU8(dst, 0);
         sbufWriteU16(dst, 0);
+        sbufWriteU8(dst, 0);
+        // Added in MSP API 1.45
+        sbufWriteU32(dst, 0);
 #endif
         break;
 
@@ -1490,7 +1829,11 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 #endif
         sbufWriteU8(dst, gyroAlignment);
         sbufWriteU8(dst, gyroAlignment);  // Starting with 4.0 gyro and acc alignment are the same
+#if defined(USE_MAG)
         sbufWriteU8(dst, compassConfig()->mag_alignment);
+#else
+        sbufWriteU8(dst, 0);
+#endif
 
         // API 1.41 - Add multi-gyro indicator, selected gyro, and support for separate gyro 1 & 2 alignment
         sbufWriteU8(dst, getGyroDetectionFlags());
@@ -1507,7 +1850,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         break;
     }
     case MSP_ADVANCED_CONFIG:
-        sbufWriteU8(dst, gyroConfig()->gyro_sync_denom);
+        sbufWriteU8(dst, 1);  // was gyroConfig()->gyro_sync_denom - removed in API 1.43
         sbufWriteU8(dst, pidConfig()->pid_process_denom);
         sbufWriteU8(dst, motorConfig()->dev.useUnsyncedPwm);
         sbufWriteU8(dst, motorConfig()->dev.motorPwmProtocol);
@@ -1527,8 +1870,8 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 
         break;
     case MSP_FILTER_CONFIG :
-        sbufWriteU8(dst, gyroConfig()->gyro_lowpass_hz);
-        sbufWriteU16(dst, currentPidProfile->dterm_lowpass_hz);
+        sbufWriteU8(dst, gyroConfig()->gyro_lpf1_static_hz);
+        sbufWriteU16(dst, currentPidProfile->dterm_lpf1_static_hz);
         sbufWriteU16(dst, currentPidProfile->yaw_lowpass_hz);
         sbufWriteU16(dst, gyroConfig()->gyro_soft_notch_hz_1);
         sbufWriteU16(dst, gyroConfig()->gyro_soft_notch_cutoff_1);
@@ -1536,21 +1879,21 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, currentPidProfile->dterm_notch_cutoff);
         sbufWriteU16(dst, gyroConfig()->gyro_soft_notch_hz_2);
         sbufWriteU16(dst, gyroConfig()->gyro_soft_notch_cutoff_2);
-        sbufWriteU8(dst, currentPidProfile->dterm_filter_type);
+        sbufWriteU8(dst, currentPidProfile->dterm_lpf1_type);
         sbufWriteU8(dst, gyroConfig()->gyro_hardware_lpf);
         sbufWriteU8(dst, 0); // DEPRECATED: gyro_32khz_hardware_lpf
-        sbufWriteU16(dst, gyroConfig()->gyro_lowpass_hz);
-        sbufWriteU16(dst, gyroConfig()->gyro_lowpass2_hz);
-        sbufWriteU8(dst, gyroConfig()->gyro_lowpass_type);
-        sbufWriteU8(dst, gyroConfig()->gyro_lowpass2_type);
-        sbufWriteU16(dst, currentPidProfile->dterm_lowpass2_hz);
+        sbufWriteU16(dst, gyroConfig()->gyro_lpf1_static_hz);
+        sbufWriteU16(dst, gyroConfig()->gyro_lpf2_static_hz);
+        sbufWriteU8(dst, gyroConfig()->gyro_lpf1_type);
+        sbufWriteU8(dst, gyroConfig()->gyro_lpf2_type);
+        sbufWriteU16(dst, currentPidProfile->dterm_lpf2_static_hz);
         // Added in MSP API 1.41
-        sbufWriteU8(dst, currentPidProfile->dterm_filter2_type);
+        sbufWriteU8(dst, currentPidProfile->dterm_lpf2_type);
 #if defined(USE_DYN_LPF)
-        sbufWriteU16(dst, gyroConfig()->dyn_lpf_gyro_min_hz);
-        sbufWriteU16(dst, gyroConfig()->dyn_lpf_gyro_max_hz);
-        sbufWriteU16(dst, currentPidProfile->dyn_lpf_dterm_min_hz);
-        sbufWriteU16(dst, currentPidProfile->dyn_lpf_dterm_max_hz);
+        sbufWriteU16(dst, gyroConfig()->gyro_lpf1_dyn_min_hz);
+        sbufWriteU16(dst, gyroConfig()->gyro_lpf1_dyn_max_hz);
+        sbufWriteU16(dst, currentPidProfile->dterm_lpf1_dyn_min_hz);
+        sbufWriteU16(dst, currentPidProfile->dterm_lpf1_dyn_max_hz);
 #else
         sbufWriteU16(dst, 0);
         sbufWriteU16(dst, 0);
@@ -1558,23 +1901,39 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, 0);
 #endif
         // Added in MSP API 1.42
-#if defined(USE_GYRO_DATA_ANALYSE)
-        sbufWriteU8(dst, gyroConfig()->dyn_notch_range);
-        sbufWriteU8(dst, gyroConfig()->dyn_notch_width_percent);
-        sbufWriteU16(dst, gyroConfig()->dyn_notch_q);
-        sbufWriteU16(dst, gyroConfig()->dyn_notch_min_hz);
+#if defined(USE_DYN_NOTCH_FILTER)
+        sbufWriteU8(dst, 0);  // DEPRECATED 1.43: dyn_notch_range
+        sbufWriteU8(dst, 0);  // DEPRECATED 1.44: dyn_notch_width_percent
+        sbufWriteU16(dst, dynNotchConfig()->dyn_notch_q);
+        sbufWriteU16(dst, dynNotchConfig()->dyn_notch_min_hz);
 #else
         sbufWriteU8(dst, 0);
         sbufWriteU8(dst, 0);
         sbufWriteU16(dst, 0);
         sbufWriteU16(dst, 0);
 #endif
-
 #if defined(USE_RPM_FILTER)
-        sbufWriteU8(dst, rpmFilterConfig()->gyro_rpm_notch_harmonics);
-        sbufWriteU8(dst, rpmFilterConfig()->gyro_rpm_notch_min);
+        sbufWriteU8(dst, rpmFilterConfig()->rpm_filter_harmonics);
+        sbufWriteU8(dst, rpmFilterConfig()->rpm_filter_min_hz);
 #else
         sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, 0);
+#endif
+#if defined(USE_DYN_NOTCH_FILTER)
+        // Added in MSP API 1.43
+        sbufWriteU16(dst, dynNotchConfig()->dyn_notch_max_hz);
+#else
+        sbufWriteU16(dst, 0);
+#endif
+#if defined(USE_DYN_LPF)
+        // Added in MSP API 1.44
+        sbufWriteU8(dst, currentPidProfile->dterm_lpf1_dyn_expo);
+#else
+        sbufWriteU8(dst, 0);
+#endif
+#if defined(USE_DYN_NOTCH_FILTER)
+        sbufWriteU8(dst, dynNotchConfig()->dyn_notch_count);
+#else
         sbufWriteU8(dst, 0);
 #endif
 
@@ -1584,18 +1943,22 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, 0);
         sbufWriteU16(dst, 0); // was pidProfile.yaw_p_limit
         sbufWriteU8(dst, 0); // reserved
-        sbufWriteU8(dst, currentPidProfile->vbatPidCompensation);
-        sbufWriteU8(dst, currentPidProfile->feedForwardTransition);
+        sbufWriteU8(dst, 0); // was vbatPidCompensation
+#if defined(USE_FEEDFORWARD)
+        sbufWriteU8(dst, currentPidProfile->feedforward_transition);
+#else
+        sbufWriteU8(dst, 0);
+#endif
         sbufWriteU8(dst, 0); // was low byte of currentPidProfile->dtermSetpointWeight
         sbufWriteU8(dst, 0); // reserved
         sbufWriteU8(dst, 0); // reserved
         sbufWriteU8(dst, 0); // reserved
         sbufWriteU16(dst, currentPidProfile->rateAccelLimit);
         sbufWriteU16(dst, currentPidProfile->yawRateAccelLimit);
-        sbufWriteU8(dst, currentPidProfile->levelAngleLimit);
+        sbufWriteU8(dst, currentPidProfile->angle_limit);
         sbufWriteU8(dst, 0); // was pidProfile.levelSensitivity
-        sbufWriteU16(dst, currentPidProfile->itermThrottleThreshold);
-        sbufWriteU16(dst, currentPidProfile->itermAcceleratorGain);
+        sbufWriteU16(dst, 0); // was currentPidProfile->itermThrottleThreshold
+        sbufWriteU16(dst, currentPidProfile->anti_gravity_gain);
         sbufWriteU16(dst, 0); // was currentPidProfile->dtermSetpointWeight
         sbufWriteU8(dst, currentPidProfile->iterm_rotation);
         sbufWriteU8(dst, 0); // was currentPidProfile->smart_feedforward
@@ -1624,8 +1987,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU16(dst, currentPidProfile->pid[PID_ROLL].F);
         sbufWriteU16(dst, currentPidProfile->pid[PID_PITCH].F);
         sbufWriteU16(dst, currentPidProfile->pid[PID_YAW].F);
-
-        sbufWriteU8(dst, currentPidProfile->antiGravityMode);
+        sbufWriteU8(dst, 0); // was currentPidProfile->antiGravityMode
 #if defined(USE_D_MIN)
         sbufWriteU8(dst, currentPidProfile->d_min[PID_ROLL]);
         sbufWriteU8(dst, currentPidProfile->d_min[PID_PITCH]);
@@ -1652,13 +2014,49 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 #else
         sbufWriteU8(dst, 0);
 #endif
-
+        // Added in MSP API 1.43
+        sbufWriteU8(dst, currentPidProfile->motor_output_limit);
+        sbufWriteU8(dst, currentPidProfile->auto_profile_cell_count);
+#if defined(USE_DYN_IDLE)
+        sbufWriteU8(dst, currentPidProfile->dyn_idle_min_rpm);
+#else
+        sbufWriteU8(dst, 0);
+#endif
+        // Added in MSP API 1.44
+#if defined(USE_FEEDFORWARD)
+        sbufWriteU8(dst, currentPidProfile->feedforward_averaging);
+        sbufWriteU8(dst, currentPidProfile->feedforward_smooth_factor);
+        sbufWriteU8(dst, currentPidProfile->feedforward_boost);
+        sbufWriteU8(dst, currentPidProfile->feedforward_max_rate_limit);
+        sbufWriteU8(dst, currentPidProfile->feedforward_jitter_factor);
+#else
+        sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, 0);
+#endif
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+        sbufWriteU8(dst, currentPidProfile->vbat_sag_compensation);
+#else
+        sbufWriteU8(dst, 0);
+#endif
+#if defined(USE_THRUST_LINEARIZATION)
+        sbufWriteU8(dst, currentPidProfile->thrustLinearization);
+#else
+        sbufWriteU8(dst, 0);
+#endif
+        sbufWriteU8(dst, currentPidProfile->tpa_mode);
+        sbufWriteU8(dst, currentPidProfile->tpa_rate);
+        sbufWriteU16(dst, currentPidProfile->tpa_breakpoint);   // was currentControlRateProfile->tpa_breakpoint
         break;
+
     case MSP_SENSOR_CONFIG:
+        // use sensorIndex_e index: 0:GyroHardware, 1:AccHardware, 2:BaroHardware, 3:MagHardware, 4:RangefinderHardware
 #if defined(USE_ACC)
         sbufWriteU8(dst, accelerometerConfig()->acc_hardware);
 #else
-        sbufWriteU8(dst, 0);
+        sbufWriteU8(dst, ACC_NONE);
 #endif
 #ifdef USE_BARO
         sbufWriteU8(dst, barometerConfig()->baro_hardware);
@@ -1670,13 +2068,51 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
 #else
         sbufWriteU8(dst, MAG_NONE);
 #endif
+        // Added in MSP API 1.46
+#ifdef USE_RANGEFINDER
+        sbufWriteU8(dst, rangefinderConfig()->rangefinder_hardware);    // no RANGEFINDER_DEFAULT value
+#else
+        sbufWriteU8(dst, RANGEFINDER_NONE);
+#endif
+        break;
+
+    // Added in MSP API 1.46
+    case MSP2_SENSOR_CONFIG_ACTIVE:
+
+#define SENSOR_NOT_AVAILABLE 0xFF
+
+#if defined(USE_GYRO)
+        sbufWriteU8(dst, detectedSensors[SENSOR_INDEX_GYRO]);
+#else
+        sbufWriteU8(dst, SENSOR_NOT_AVAILABLE);
+#endif
+#if defined(USE_ACC)
+        sbufWriteU8(dst, detectedSensors[SENSOR_INDEX_ACC]);
+#else
+        sbufWriteU8(dst, SENSOR_NOT_AVAILABLE);
+#endif
+#ifdef USE_BARO
+        sbufWriteU8(dst, detectedSensors[SENSOR_INDEX_BARO]);
+#else
+        sbufWriteU8(dst, SENSOR_NOT_AVAILABLE);
+#endif
+#ifdef USE_MAG
+        sbufWriteU8(dst, detectedSensors[SENSOR_INDEX_MAG]);
+#else
+        sbufWriteU8(dst, SENSOR_NOT_AVAILABLE);
+#endif
+#ifdef USE_RANGEFINDER
+        sbufWriteU8(dst, detectedSensors[SENSOR_INDEX_RANGEFINDER]);
+#else
+        sbufWriteU8(dst, SENSOR_NOT_AVAILABLE);
+#endif
         break;
 
 #if defined(USE_VTX_COMMON)
     case MSP_VTX_CONFIG:
         {
             const vtxDevice_t *vtxDevice = vtxCommonDevice();
-            unsigned vtxStatus;
+            unsigned vtxStatus = 0;
             vtxDevType_e vtxType = VTXDEV_UNKNOWN;
             uint8_t deviceIsReady = 0;
             if (vtxDevice) {
@@ -1706,7 +2142,9 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
             sbufWriteU8(dst, 0);
             sbufWriteU8(dst, 0);
 #endif
-
+#ifdef USE_VTX_MSP
+            setMspVtxDeviceStatusReady(srcDesc);
+#endif
         }
         break;
 #endif
@@ -1748,7 +2186,134 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
     return !unsupportedCommand;
 }
 
-static mspResult_e mspFcProcessOutCommandWithArg(uint8_t cmdMSP, sbuf_t *src, sbuf_t *dst, mspPostProcessFnPtr *mspPostProcessFn)
+
+#ifdef USE_SIMPLIFIED_TUNING
+// Reads simplified PID tuning values from MSP buffer
+static void readSimplifiedPids(pidProfile_t* pidProfile, sbuf_t *src)
+{
+    pidProfile->simplified_pids_mode = sbufReadU8(src);
+    pidProfile->simplified_master_multiplier = sbufReadU8(src);
+    pidProfile->simplified_roll_pitch_ratio = sbufReadU8(src);
+    pidProfile->simplified_i_gain = sbufReadU8(src);
+    pidProfile->simplified_d_gain = sbufReadU8(src);
+    pidProfile->simplified_pi_gain = sbufReadU8(src);
+#ifdef USE_D_MIN
+    pidProfile->simplified_dmin_ratio = sbufReadU8(src);
+#else
+    sbufReadU8(src);
+#endif
+    pidProfile->simplified_feedforward_gain = sbufReadU8(src);
+    pidProfile->simplified_pitch_pi_gain = sbufReadU8(src);
+    sbufReadU32(src); // reserved for future use
+    sbufReadU32(src); // reserved for future use
+}
+
+// Writes simplified PID tuning values to MSP buffer
+static void writeSimplifiedPids(const pidProfile_t *pidProfile, sbuf_t *dst)
+{
+    sbufWriteU8(dst, pidProfile->simplified_pids_mode);
+    sbufWriteU8(dst, pidProfile->simplified_master_multiplier);
+    sbufWriteU8(dst, pidProfile->simplified_roll_pitch_ratio);
+    sbufWriteU8(dst, pidProfile->simplified_i_gain);
+    sbufWriteU8(dst, pidProfile->simplified_d_gain);
+    sbufWriteU8(dst, pidProfile->simplified_pi_gain);
+#ifdef USE_D_MIN
+    sbufWriteU8(dst, pidProfile->simplified_dmin_ratio);
+#else
+    sbufWriteU8(dst, 0);
+#endif
+    sbufWriteU8(dst, pidProfile->simplified_feedforward_gain);
+    sbufWriteU8(dst, pidProfile->simplified_pitch_pi_gain);
+    sbufWriteU32(dst, 0); // reserved for future use
+    sbufWriteU32(dst, 0); // reserved for future use
+}
+
+// Reads simplified Dterm Filter values from MSP buffer
+static void readSimplifiedDtermFilters(pidProfile_t* pidProfile, sbuf_t *src)
+{
+    pidProfile->simplified_dterm_filter = sbufReadU8(src);
+    pidProfile->simplified_dterm_filter_multiplier = sbufReadU8(src);
+    pidProfile->dterm_lpf1_static_hz = sbufReadU16(src);
+    pidProfile->dterm_lpf2_static_hz = sbufReadU16(src);
+#if defined(USE_DYN_LPF)
+    pidProfile->dterm_lpf1_dyn_min_hz = sbufReadU16(src);
+    pidProfile->dterm_lpf1_dyn_max_hz = sbufReadU16(src);
+#else
+    sbufReadU16(src);
+    sbufReadU16(src);
+#endif
+    sbufReadU32(src); // reserved for future use
+    sbufReadU32(src); // reserved for future use
+}
+
+// Writes simplified Dterm Filter values into MSP buffer
+static void writeSimplifiedDtermFilters(const pidProfile_t* pidProfile, sbuf_t *dst)
+{
+    sbufWriteU8(dst, pidProfile->simplified_dterm_filter);
+    sbufWriteU8(dst, pidProfile->simplified_dterm_filter_multiplier);
+    sbufWriteU16(dst, pidProfile->dterm_lpf1_static_hz);
+    sbufWriteU16(dst, pidProfile->dterm_lpf2_static_hz);
+#if defined(USE_DYN_LPF)
+    sbufWriteU16(dst, pidProfile->dterm_lpf1_dyn_min_hz);
+    sbufWriteU16(dst, pidProfile->dterm_lpf1_dyn_max_hz);
+#else
+    sbufWriteU16(dst, 0);
+    sbufWriteU16(dst, 0);
+#endif
+    sbufWriteU32(dst, 0); // reserved for future use
+    sbufWriteU32(dst, 0); // reserved for future use
+}
+
+// Writes simplified Gyro Filter values from MSP buffer
+static void readSimplifiedGyroFilters(gyroConfig_t *gyroConfig, sbuf_t *src)
+{
+    gyroConfig->simplified_gyro_filter = sbufReadU8(src);
+    gyroConfig->simplified_gyro_filter_multiplier = sbufReadU8(src);
+    gyroConfig->gyro_lpf1_static_hz = sbufReadU16(src);
+    gyroConfig->gyro_lpf2_static_hz = sbufReadU16(src);
+#if defined(USE_DYN_LPF)
+    gyroConfig->gyro_lpf1_dyn_min_hz = sbufReadU16(src);
+    gyroConfig->gyro_lpf1_dyn_max_hz = sbufReadU16(src);
+#else
+    sbufReadU16(src);
+    sbufReadU16(src);
+#endif
+    sbufReadU32(src); // reserved for future use
+    sbufReadU32(src); // reserved for future use
+}
+
+// Writes simplified Gyro Filter values into MSP buffer
+static void writeSimplifiedGyroFilters(const gyroConfig_t *gyroConfig, sbuf_t *dst)
+{
+    sbufWriteU8(dst, gyroConfig->simplified_gyro_filter);
+    sbufWriteU8(dst, gyroConfig->simplified_gyro_filter_multiplier);
+    sbufWriteU16(dst, gyroConfig->gyro_lpf1_static_hz);
+    sbufWriteU16(dst, gyroConfig->gyro_lpf2_static_hz);
+#if defined(USE_DYN_LPF)
+    sbufWriteU16(dst, gyroConfig->gyro_lpf1_dyn_min_hz);
+    sbufWriteU16(dst, gyroConfig->gyro_lpf1_dyn_max_hz);
+#else
+    sbufWriteU16(dst, 0);
+    sbufWriteU16(dst, 0);
+#endif
+    sbufWriteU32(dst, 0); // reserved for future use
+    sbufWriteU32(dst, 0); // reserved for future use
+}
+
+// writes results of simplified PID tuning values to MSP buffer
+static void writePidfs(pidProfile_t* pidProfile, sbuf_t *dst)
+{
+    for (int i = 0; i < XYZ_AXIS_COUNT; i++) {
+        sbufWriteU8(dst, pidProfile->pid[i].P);
+        sbufWriteU8(dst, pidProfile->pid[i].I);
+        sbufWriteU8(dst, pidProfile->pid[i].D);
+        sbufWriteU8(dst, pidProfile->d_min[i]);
+        sbufWriteU16(dst, pidProfile->pid[i].F);
+    }
+}
+#endif // USE_SIMPLIFIED_TUNING
+
+static mspResult_e mspFcProcessOutCommandWithArg(mspDescriptor_t srcDesc, int16_t cmdMSP, sbuf_t *src, sbuf_t *dst, mspPostProcessFnPtr *mspPostProcessFn)
 {
 
     switch (cmdMSP) {
@@ -1793,6 +2358,11 @@ static mspResult_e mspFcProcessOutCommandWithArg(uint8_t cmdMSP, sbuf_t *src, sb
         }
 #endif
 
+#if defined(USE_MSP_OVER_TELEMETRY)
+        if (featureIsEnabled(FEATURE_RX_SPI) && srcDesc == getMspTelemetryDescriptor()) {
+            dispatchAdd(&mspRebootEntry, MSP_DISPATCH_DELAY_US);
+        } else
+#endif
         if (mspPostProcessFn) {
             *mspPostProcessFn = mspRebootFn;
         }
@@ -1804,30 +2374,29 @@ static mspResult_e mspFcProcessOutCommandWithArg(uint8_t cmdMSP, sbuf_t *src, sb
             if (sbufBytesRemaining(src) == 0) {
                 return MSP_RESULT_ERROR;
             }
-            int bytesRemaining = sbufBytesRemaining(dst) - 1; // need to keep one byte for checksum
+            int bytesRemaining = sbufBytesRemaining(dst);
             mspPacket_t packetIn, packetOut;
-            sbufInit(&packetIn.buf, src->end, src->end);
-            uint8_t* resetInputPtr = src->ptr;
+            sbufInit(&packetIn.buf, src->end, src->end); // there is no paramater for MSP_MULTIPLE_MSP
+            uint8_t* initialInputPtr = src->ptr;
             while (sbufBytesRemaining(src) && bytesRemaining > 0) {
                 uint8_t newMSP = sbufReadU8(src);
-                sbufInit(&packetOut.buf, dst->ptr, dst->end);
+                sbufInit(&packetOut.buf, dst->ptr + 1, dst->end); // reserve 1 byte for length
                 packetIn.cmd = newMSP;
-                mspFcProcessCommand(&packetIn, &packetOut, NULL);
-                uint8_t mspSize = sbufPtr(&packetOut.buf) - dst->ptr;
-                mspSize++; // need to add length information for each MSP
+                mspFcProcessCommand(srcDesc, &packetIn, &packetOut, NULL);
+                uint8_t mspSize = sbufPtr(&packetOut.buf) - dst->ptr; // length included
                 bytesRemaining -= mspSize;
                 if (bytesRemaining >= 0) {
                     maxMSPs++;
                 }
             }
-            src->ptr = resetInputPtr;
+            src->ptr = initialInputPtr;
             sbufInit(&packetOut.buf, dst->ptr, dst->end);
             for (int i = 0; i < maxMSPs; i++) {
                 uint8_t* sizePtr = sbufPtr(&packetOut.buf);
-                sbufWriteU8(&packetOut.buf, 0); // dummy
+                sbufWriteU8(&packetOut.buf, 0); // placeholder for reply size
                 packetIn.cmd = sbufReadU8(src);
-                mspFcProcessCommand(&packetIn, &packetOut, NULL);
-                (*sizePtr) = sbufPtr(&packetOut.buf) - (sizePtr + 1);
+                mspFcProcessCommand(srcDesc, &packetIn, &packetOut, NULL);
+                *sizePtr = sbufPtr(&packetOut.buf) - (sizePtr + 1);
             }
             dst->ptr = packetOut.buf.ptr;
         }
@@ -1852,6 +2421,9 @@ static mspResult_e mspFcProcessOutCommandWithArg(uint8_t cmdMSP, sbuf_t *src, sb
             } else {
                 return MSP_RESULT_ERROR;
             }
+#ifdef USE_VTX_MSP
+            setMspVtxDeviceStatusReady(srcDesc);
+#endif
         }
         break;
 
@@ -1868,31 +2440,107 @@ static mspResult_e mspFcProcessOutCommandWithArg(uint8_t cmdMSP, sbuf_t *src, sb
             } else {
                 return MSP_RESULT_ERROR;
             }
+#ifdef USE_VTX_MSP
+            setMspVtxDeviceStatusReady(srcDesc);
+#endif
         }
         break;
 #endif // USE_VTX_TABLE
 
+#ifdef USE_SIMPLIFIED_TUNING
+    // Added in MSP API 1.44
+    case MSP_SIMPLIFIED_TUNING:
+        {
+            writeSimplifiedPids(currentPidProfile, dst);
+            writeSimplifiedDtermFilters(currentPidProfile, dst);
+            writeSimplifiedGyroFilters(gyroConfig(), dst);
+        }
+        break;
+
+    case MSP_CALCULATE_SIMPLIFIED_PID:
+        {
+            pidProfile_t tempPidProfile = *currentPidProfile;
+            readSimplifiedPids(&tempPidProfile, src);
+            applySimplifiedTuningPids(&tempPidProfile);
+            writePidfs(&tempPidProfile, dst);
+        }
+        break;
+
+    case MSP_CALCULATE_SIMPLIFIED_DTERM:
+        {
+            pidProfile_t tempPidProfile = *currentPidProfile;
+            readSimplifiedDtermFilters(&tempPidProfile, src);
+            applySimplifiedTuningDtermFilters(&tempPidProfile);
+            writeSimplifiedDtermFilters(&tempPidProfile, dst);
+        }
+        break;
+
+    case MSP_CALCULATE_SIMPLIFIED_GYRO:
+        {
+            gyroConfig_t tempGyroConfig = *gyroConfig();
+            readSimplifiedGyroFilters(&tempGyroConfig, src);
+            applySimplifiedTuningGyroFilters(&tempGyroConfig);
+            writeSimplifiedGyroFilters(&tempGyroConfig, dst);
+        }
+        break;
+
+    case MSP_VALIDATE_SIMPLIFIED_TUNING:
+        {
+            pidProfile_t tempPidProfile = *currentPidProfile;
+            applySimplifiedTuningPids(&tempPidProfile);
+            bool result = true;
+
+            for (int i = 0; i < XYZ_AXIS_COUNT; i++) {
+                result = result &&
+                    tempPidProfile.pid[i].P == currentPidProfile->pid[i].P &&
+                    tempPidProfile.pid[i].I == currentPidProfile->pid[i].I &&
+                    tempPidProfile.pid[i].D == currentPidProfile->pid[i].D &&
+                    tempPidProfile.d_min[i] == currentPidProfile->d_min[i] &&
+                    tempPidProfile.pid[i].F == currentPidProfile->pid[i].F;
+            }
+
+            sbufWriteU8(dst, result);
+
+            gyroConfig_t tempGyroConfig = *gyroConfig();
+            applySimplifiedTuningGyroFilters(&tempGyroConfig);
+            result =
+                tempGyroConfig.gyro_lpf1_static_hz == gyroConfig()->gyro_lpf1_static_hz &&
+                tempGyroConfig.gyro_lpf2_static_hz == gyroConfig()->gyro_lpf2_static_hz;
+
+#if defined(USE_DYN_LPF)
+            result = result &&
+                tempGyroConfig.gyro_lpf1_dyn_min_hz == gyroConfig()->gyro_lpf1_dyn_min_hz &&
+                tempGyroConfig.gyro_lpf1_dyn_max_hz == gyroConfig()->gyro_lpf1_dyn_max_hz;
+#endif
+
+            sbufWriteU8(dst, result);
+
+            applySimplifiedTuningDtermFilters(&tempPidProfile);
+            result =
+                tempPidProfile.dterm_lpf1_static_hz == currentPidProfile->dterm_lpf1_static_hz &&
+                tempPidProfile.dterm_lpf2_static_hz == currentPidProfile->dterm_lpf2_static_hz;
+
+#if defined(USE_DYN_LPF)
+            result = result &&
+                tempPidProfile.dterm_lpf1_dyn_min_hz == currentPidProfile->dterm_lpf1_dyn_min_hz &&
+                tempPidProfile.dterm_lpf1_dyn_max_hz == currentPidProfile->dterm_lpf1_dyn_max_hz;
+#endif
+
+            sbufWriteU8(dst, result);
+        }
+        break;
+#endif
+
     case MSP_RESET_CONF:
         {
-#if defined(USE_CUSTOM_DEFAULTS)
-            defaultsType_e defaultsType = DEFAULTS_TYPE_CUSTOM;
-#endif
             if (sbufBytesRemaining(src) >= 1) {
                 // Added in MSP API 1.42
-#if defined(USE_CUSTOM_DEFAULTS)
-                defaultsType = sbufReadU8(src);
-#else
                 sbufReadU8(src);
-#endif
             }
 
             bool success = false;
             if (!ARMING_FLAG(ARMED)) {
-#if defined(USE_CUSTOM_DEFAULTS)
-                success = resetEEPROM(defaultsType == DEFAULTS_TYPE_CUSTOM);
-#else
-                success = resetEEPROM(false);
-#endif
+                success = resetEEPROM();
 
                 if (success && mspPostProcessFn) {
                     rebootMode = MSP_REBOOT_FIRMWARE;
@@ -1905,6 +2553,63 @@ static mspResult_e mspFcProcessOutCommandWithArg(uint8_t cmdMSP, sbuf_t *src, sb
         }
 
         break;
+
+    case MSP2_GET_TEXT:
+        {
+            // type byte, then length byte followed by the actual characters
+            const uint8_t textType = sbufBytesRemaining(src) ? sbufReadU8(src) : 0;
+
+            const char *textVar;
+
+            switch (textType) {
+                case MSP2TEXT_PILOT_NAME:
+                    textVar = pilotConfigMutable()->pilotName;
+                    break;
+
+                case MSP2TEXT_CRAFT_NAME:
+                    textVar = pilotConfigMutable()->craftName;
+                    break;
+
+                case MSP2TEXT_PID_PROFILE_NAME:
+                    textVar = currentPidProfile->profileName;
+                    break;
+
+                case MSP2TEXT_RATE_PROFILE_NAME:
+                    textVar = currentControlRateProfile->profileName;
+                    break;
+
+                case MSP2TEXT_BUILDKEY:
+                    textVar = buildKey;
+                    break;
+
+                case MSP2TEXT_RELEASENAME:
+                    textVar = releaseName;
+                    break;
+
+                default:
+                    return MSP_RESULT_ERROR;
+            }
+
+            if (!textVar) return MSP_RESULT_ERROR;
+
+            const uint8_t textLength = strlen(textVar);
+
+            //  type byte, then length byte followed by the actual characters
+            sbufWriteU8(dst, textType);
+            sbufWriteU8(dst, textLength);
+            for (unsigned int i = 0; i < textLength; i++) {
+                sbufWriteU8(dst, textVar[i]);
+            }
+        }
+        break;
+#ifdef USE_LED_STRIP
+    case MSP2_GET_LED_STRIP_CONFIG_VALUES:
+        sbufWriteU8(dst, ledStripConfig()->ledstrip_brightness);
+        sbufWriteU16(dst, ledStripConfig()->ledstrip_rainbow_delta);
+        sbufWriteU16(dst, ledStripConfig()->ledstrip_rainbow_freq);
+        break;
+#endif
+
     default:
         return MSP_RESULT_CMD_UNKNOWN;
     }
@@ -1934,7 +2639,7 @@ static void mspFcDataFlashReadCommand(sbuf_t *dst, sbuf_t *src)
 }
 #endif
 
-static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
+static mspResult_e mspProcessInCommand(mspDescriptor_t srcDesc, int16_t cmdMSP, sbuf_t *src)
 {
     uint32_t i;
     uint8_t value;
@@ -2002,9 +2707,12 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
 #endif
     case MSP_SET_ARMING_CONFIG:
         armingConfigMutable()->auto_disarm_delay = sbufReadU8(src);
-        sbufReadU8(src); // reserved
+        sbufReadU8(src); // reserved. disarm_kill_switch was removed in #5073
         if (sbufBytesRemaining(src)) {
           imuConfigMutable()->small_angle = sbufReadU8(src);
+        }
+        if (sbufBytesRemaining(src)) {
+            armingConfigMutable()->gyro_cal_on_first_arm = sbufReadU8(src);
         }
         break;
 
@@ -2081,11 +2789,10 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
                 currentControlRateProfile->rates[i] = sbufReadU8(src);
             }
 
-            value = sbufReadU8(src);
-            currentControlRateProfile->dynThrPID = MIN(value, CONTROL_RATE_CONFIG_TPA_MAX);
+            sbufReadU8(src);    // tpa_rate is moved to PID profile
             currentControlRateProfile->thrMid8 = sbufReadU8(src);
             currentControlRateProfile->thrExpo8 = sbufReadU8(src);
-            currentControlRateProfile->tpa_breakpoint = sbufReadU16(src);
+            sbufReadU16(src);   // tpa_breakpoint is moved to PID profile
 
             if (sbufBytesRemaining(src) >= 1) {
                 currentControlRateProfile->rcExpo[FD_YAW] = sbufReadU8(src);
@@ -2116,6 +2823,11 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
                 currentControlRateProfile->rate_limit[FD_YAW] = sbufReadU16(src);
             }
 
+            // version 1.43
+            if (sbufBytesRemaining(src) >= 1) {
+                currentControlRateProfile->rates_type = sbufReadU8(src);
+            }
+
             initRcProcessing();
         } else {
             return MSP_RESULT_ERROR;
@@ -2144,19 +2856,47 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         gpsConfigMutable()->sbasMode = sbufReadU8(src);
         gpsConfigMutable()->autoConfig = sbufReadU8(src);
         gpsConfigMutable()->autoBaud = sbufReadU8(src);
+        if (sbufBytesRemaining(src) >= 2) {
+            // Added in API version 1.43
+            gpsConfigMutable()->gps_set_home_point_once = sbufReadU8(src);
+            gpsConfigMutable()->gps_ublox_use_galileo = sbufReadU8(src);
+        }
         break;
+#endif
 
+#ifdef USE_MAG
+    case MSP_SET_COMPASS_CONFIG:
+        imuConfigMutable()->mag_declination = sbufReadU16(src);
+        break;
+#endif
+
+#ifdef USE_GPS
 #ifdef USE_GPS_RESCUE
-        case MSP_SET_GPS_RESCUE:
-        gpsRescueConfigMutable()->angle = sbufReadU16(src);
-        gpsRescueConfigMutable()->initialAltitudeM = sbufReadU16(src);
+    case MSP_SET_GPS_RESCUE:
+        gpsRescueConfigMutable()->maxRescueAngle = sbufReadU16(src);
+        gpsRescueConfigMutable()->returnAltitudeM = sbufReadU16(src);
         gpsRescueConfigMutable()->descentDistanceM = sbufReadU16(src);
-        gpsRescueConfigMutable()->rescueGroundspeed = sbufReadU16(src);
+        gpsRescueConfigMutable()->groundSpeedCmS = sbufReadU16(src);
         gpsRescueConfigMutable()->throttleMin = sbufReadU16(src);
         gpsRescueConfigMutable()->throttleMax = sbufReadU16(src);
-        gpsRescueConfigMutable()->throttleHover = sbufReadU16(src);
+        positionConfigMutable()->hover_throttle = sbufReadU16(src);
         gpsRescueConfigMutable()->sanityChecks = sbufReadU8(src);
         gpsRescueConfigMutable()->minSats = sbufReadU8(src);
+        if (sbufBytesRemaining(src) >= 6) {
+            // Added in API version 1.43
+            gpsRescueConfigMutable()->ascendRate = sbufReadU16(src);
+            gpsRescueConfigMutable()->descendRate = sbufReadU16(src);
+            gpsRescueConfigMutable()->allowArmingWithoutFix = sbufReadU8(src);
+            gpsRescueConfigMutable()->altitudeMode = sbufReadU8(src);
+        }
+        if (sbufBytesRemaining(src) >= 2) {
+            // Added in API version 1.44
+            gpsRescueConfigMutable()->minStartDistM = sbufReadU16(src);
+        }
+        if (sbufBytesRemaining(src) >= 2) {
+            // Added in API version 1.46
+            gpsRescueConfigMutable()->initialClimbM = sbufReadU16(src);
+        }
         break;
 
     case MSP_SET_GPS_RESCUE_PIDS:
@@ -2169,12 +2909,6 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         gpsRescueConfigMutable()->yawP = sbufReadU16(src);
         break;
 #endif
-#endif
-
-#ifdef USE_MAG
-    case MSP_SET_COMPASS_CONFIG:
-        compassConfigMutable()->mag_declination = sbufReadU16(src) * 10;
-        break;
 #endif
 
     case MSP_SET_MOTOR:
@@ -2236,12 +2970,16 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
     case MSP_SET_RESET_CURR_PID:
         resetPidProfile(currentPidProfile);
         break;
-        
+
     case MSP_SET_SENSOR_ALIGNMENT: {
         // maintain backwards compatibility for API < 1.41
         const uint8_t gyroAlignment = sbufReadU8(src);
         sbufReadU8(src);  // discard deprecated acc_align
+#if defined(USE_MAG)
         compassConfigMutable()->mag_alignment = sbufReadU8(src);
+#else
+        sbufReadU8(src);
+#endif
 
         if (sbufBytesRemaining(src) >= 3) {
             // API >= 1.41 - support the gyro_to_use and alignment for gyros 1 & 2
@@ -2276,14 +3014,10 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
     }
 
     case MSP_SET_ADVANCED_CONFIG:
-        gyroConfigMutable()->gyro_sync_denom = sbufReadU8(src);
+        sbufReadU8(src); // was gyroConfigMutable()->gyro_sync_denom - removed in API 1.43
         pidConfigMutable()->pid_process_denom = sbufReadU8(src);
         motorConfigMutable()->dev.useUnsyncedPwm = sbufReadU8(src);
-#ifdef USE_DSHOT
-        motorConfigMutable()->dev.motorPwmProtocol = constrain(sbufReadU8(src), 0, PWM_TYPE_MAX - 1);
-#else
-        motorConfigMutable()->dev.motorPwmProtocol = constrain(sbufReadU8(src), 0, PWM_TYPE_BRUSHED);
-#endif
+        motorConfigMutable()->dev.motorPwmProtocol = sbufReadU8(src);
         motorConfigMutable()->dev.motorPwmRate = sbufReadU16(src);
         if (sbufBytesRemaining(src) >= 2) {
             motorConfigMutable()->digitalIdleOffsetValue = sbufReadU16(src);
@@ -2311,8 +3045,8 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
 
         break;
     case MSP_SET_FILTER_CONFIG:
-        gyroConfigMutable()->gyro_lowpass_hz = sbufReadU8(src);
-        currentPidProfile->dterm_lowpass_hz = sbufReadU16(src);
+        gyroConfigMutable()->gyro_lpf1_static_hz = sbufReadU8(src);
+        currentPidProfile->dterm_lpf1_static_hz = sbufReadU16(src);
         currentPidProfile->yaw_lowpass_hz = sbufReadU16(src);
         if (sbufBytesRemaining(src) >= 8) {
             gyroConfigMutable()->gyro_soft_notch_hz_1 = sbufReadU16(src);
@@ -2325,25 +3059,25 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             gyroConfigMutable()->gyro_soft_notch_cutoff_2 = sbufReadU16(src);
         }
         if (sbufBytesRemaining(src) >= 1) {
-            currentPidProfile->dterm_filter_type = sbufReadU8(src);
+            currentPidProfile->dterm_lpf1_type = sbufReadU8(src);
         }
         if (sbufBytesRemaining(src) >= 10) {
             gyroConfigMutable()->gyro_hardware_lpf = sbufReadU8(src);
             sbufReadU8(src); // DEPRECATED: gyro_32khz_hardware_lpf
-            gyroConfigMutable()->gyro_lowpass_hz = sbufReadU16(src);
-            gyroConfigMutable()->gyro_lowpass2_hz = sbufReadU16(src);
-            gyroConfigMutable()->gyro_lowpass_type = sbufReadU8(src);
-            gyroConfigMutable()->gyro_lowpass2_type = sbufReadU8(src);
-            currentPidProfile->dterm_lowpass2_hz = sbufReadU16(src);
+            gyroConfigMutable()->gyro_lpf1_static_hz = sbufReadU16(src);
+            gyroConfigMutable()->gyro_lpf2_static_hz = sbufReadU16(src);
+            gyroConfigMutable()->gyro_lpf1_type = sbufReadU8(src);
+            gyroConfigMutable()->gyro_lpf2_type = sbufReadU8(src);
+            currentPidProfile->dterm_lpf2_static_hz = sbufReadU16(src);
         }
         if (sbufBytesRemaining(src) >= 9) {
             // Added in MSP API 1.41
-            currentPidProfile->dterm_filter2_type = sbufReadU8(src);
+            currentPidProfile->dterm_lpf2_type = sbufReadU8(src);
 #if defined(USE_DYN_LPF)
-            gyroConfigMutable()->dyn_lpf_gyro_min_hz = sbufReadU16(src);
-            gyroConfigMutable()->dyn_lpf_gyro_max_hz = sbufReadU16(src);
-            currentPidProfile->dyn_lpf_dterm_min_hz = sbufReadU16(src);
-            currentPidProfile->dyn_lpf_dterm_max_hz = sbufReadU16(src);
+            gyroConfigMutable()->gyro_lpf1_dyn_min_hz = sbufReadU16(src);
+            gyroConfigMutable()->gyro_lpf1_dyn_max_hz = sbufReadU16(src);
+            currentPidProfile->dterm_lpf1_dyn_min_hz = sbufReadU16(src);
+            currentPidProfile->dterm_lpf1_dyn_max_hz = sbufReadU16(src);
 #else
             sbufReadU16(src);
             sbufReadU16(src);
@@ -2353,23 +3087,43 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         }
         if (sbufBytesRemaining(src) >= 8) {
             // Added in MSP API 1.42
-#if defined(USE_GYRO_DATA_ANALYSE)
-            gyroConfigMutable()->dyn_notch_range = sbufReadU8(src);
-            gyroConfigMutable()->dyn_notch_width_percent = sbufReadU8(src);
-            gyroConfigMutable()->dyn_notch_q = sbufReadU16(src);
-            gyroConfigMutable()->dyn_notch_min_hz = sbufReadU16(src);
+#if defined(USE_DYN_NOTCH_FILTER)
+            sbufReadU8(src); // DEPRECATED 1.43: dyn_notch_range
+            sbufReadU8(src); // DEPRECATED 1.44: dyn_notch_width_percent
+            dynNotchConfigMutable()->dyn_notch_q = sbufReadU16(src);
+            dynNotchConfigMutable()->dyn_notch_min_hz = sbufReadU16(src);
 #else
             sbufReadU8(src);
             sbufReadU8(src);
             sbufReadU16(src);
             sbufReadU16(src);
 #endif
-
 #if defined(USE_RPM_FILTER)
-            rpmFilterConfigMutable()->gyro_rpm_notch_harmonics = sbufReadU8(src);
-            rpmFilterConfigMutable()->gyro_rpm_notch_min = sbufReadU8(src);
+            rpmFilterConfigMutable()->rpm_filter_harmonics = sbufReadU8(src);
+            rpmFilterConfigMutable()->rpm_filter_min_hz = sbufReadU8(src);
 #else
             sbufReadU8(src);
+            sbufReadU8(src);
+#endif
+        }
+        if (sbufBytesRemaining(src) >= 2) {
+#if defined(USE_DYN_NOTCH_FILTER)
+            // Added in MSP API 1.43
+            dynNotchConfigMutable()->dyn_notch_max_hz = sbufReadU16(src);
+#else
+            sbufReadU16(src);
+#endif
+        }
+        if (sbufBytesRemaining(src) >= 2) {
+            // Added in MSP API 1.44
+#if defined(USE_DYN_LPF)
+            currentPidProfile->dterm_lpf1_dyn_expo = sbufReadU8(src);
+#else
+            sbufReadU8(src);
+#endif
+#if defined(USE_DYN_NOTCH_FILTER)
+            dynNotchConfigMutable()->dyn_notch_count = sbufReadU8(src);
+#else
             sbufReadU8(src);
 #endif
         }
@@ -2386,8 +3140,12 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         sbufReadU16(src);
         sbufReadU16(src); // was pidProfile.yaw_p_limit
         sbufReadU8(src); // reserved
-        currentPidProfile->vbatPidCompensation = sbufReadU8(src);
-        currentPidProfile->feedForwardTransition = sbufReadU8(src);
+        sbufReadU8(src); // was vbatPidCompensation
+#if defined(USE_FEEDFORWARD)
+        currentPidProfile->feedforward_transition = sbufReadU8(src);
+#else
+        sbufReadU8(src);
+#endif
         sbufReadU8(src); // was low byte of currentPidProfile->dtermSetpointWeight
         sbufReadU8(src); // reserved
         sbufReadU8(src); // reserved
@@ -2395,12 +3153,12 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         currentPidProfile->rateAccelLimit = sbufReadU16(src);
         currentPidProfile->yawRateAccelLimit = sbufReadU16(src);
         if (sbufBytesRemaining(src) >= 2) {
-            currentPidProfile->levelAngleLimit = sbufReadU8(src);
+            currentPidProfile->angle_limit = sbufReadU8(src);
             sbufReadU8(src); // was pidProfile.levelSensitivity
         }
         if (sbufBytesRemaining(src) >= 4) {
-            currentPidProfile->itermThrottleThreshold = sbufReadU16(src);
-            currentPidProfile->itermAcceleratorGain = sbufReadU16(src);
+            sbufReadU16(src); // was currentPidProfile->itermThrottleThreshold
+            currentPidProfile->anti_gravity_gain = sbufReadU16(src);
         }
         if (sbufBytesRemaining(src) >= 2) {
             sbufReadU16(src); // was currentPidProfile->dtermSetpointWeight
@@ -2435,8 +3193,7 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             currentPidProfile->pid[PID_ROLL].F = sbufReadU16(src);
             currentPidProfile->pid[PID_PITCH].F = sbufReadU16(src);
             currentPidProfile->pid[PID_YAW].F = sbufReadU16(src);
-
-            currentPidProfile->antiGravityMode = sbufReadU8(src);
+            sbufReadU8(src); // was currentPidProfile->antiGravityMode
         }
         if (sbufBytesRemaining(src) >= 7) {
             // Added in MSP API 1.41
@@ -2469,7 +3226,53 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             sbufReadU8(src);
 #endif
         }
+        if (sbufBytesRemaining(src) >= 3) {
+            // Added in MSP API 1.43
+            currentPidProfile->motor_output_limit = sbufReadU8(src);
+            currentPidProfile->auto_profile_cell_count = sbufReadU8(src);
+#if defined(USE_DYN_IDLE)
+            currentPidProfile->dyn_idle_min_rpm = sbufReadU8(src);
+#else
+            sbufReadU8(src);
+#endif
+        }
+        if (sbufBytesRemaining(src) >= 7) {
+            // Added in MSP API 1.44
+#if defined(USE_FEEDFORWARD)
+            currentPidProfile->feedforward_averaging = sbufReadU8(src);
+            currentPidProfile->feedforward_smooth_factor = sbufReadU8(src);
+            currentPidProfile->feedforward_boost = sbufReadU8(src);
+            currentPidProfile->feedforward_max_rate_limit = sbufReadU8(src);
+            currentPidProfile->feedforward_jitter_factor = sbufReadU8(src);
+#else
+            sbufReadU8(src);
+            sbufReadU8(src);
+            sbufReadU8(src);
+            sbufReadU8(src);
+            sbufReadU8(src);
+#endif
+
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+            currentPidProfile->vbat_sag_compensation = sbufReadU8(src);
+#else
+            sbufReadU8(src);
+#endif
+#if defined(USE_THRUST_LINEARIZATION)
+            currentPidProfile->thrustLinearization = sbufReadU8(src);
+#else
+            sbufReadU8(src);
+#endif
+        }
+        if (sbufBytesRemaining(src) >= 4) {
+            // Added in API 1.45
+            currentPidProfile->tpa_mode = sbufReadU8(src);
+            currentPidProfile->tpa_rate = MIN(sbufReadU8(src), TPA_MAX);
+            currentPidProfile->tpa_breakpoint = sbufReadU16(src);
+        }
+
         pidInitConfig(currentPidProfile);
+        initEscEndpoints();
+        mixerInitProfile();
 
         break;
     case MSP_SET_SENSOR_CONFIG:
@@ -2493,33 +3296,35 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
 #ifdef USE_ACC
     case MSP_ACC_CALIBRATION:
         if (!ARMING_FLAG(ARMED))
-            accSetCalibrationCycles(CALIBRATING_ACC_CYCLES);
+            accStartCalibration();
         break;
 #endif
 
+#if defined(USE_MAG)
     case MSP_MAG_CALIBRATION:
-        if (!ARMING_FLAG(ARMED))
-            ENABLE_STATE(CALIBRATE_MAG);
-        break;
+        if (!ARMING_FLAG(ARMED)) {
+            compassStartCalibration();
+        }
+#endif
 
+        break;
     case MSP_EEPROM_WRITE:
         if (ARMING_FLAG(ARMED)) {
             return MSP_RESULT_ERROR;
         }
 
-        if (featureMaskIsCopied) {
-            writeEEPROMWithFeatures(featureMaskCopy);
-        } else {
-            writeEEPROM();
-        }
-        readEEPROM();
+        // This is going to take some time and won't be done where real-time performance is needed so
+        // ignore how long it takes to avoid confusing the scheduler
+        schedulerIgnoreTaskStateTime();
 
-#ifdef USE_VTX_TABLE
-        if (vtxTableNeedsInit) {
-            vtxTableNeedsInit = false;
-            vtxTableInit();  // Reinitialize and refresh the in-memory copies
-        }
+#if defined(USE_MSP_OVER_TELEMETRY)
+        if (featureIsEnabled(FEATURE_RX_SPI) && srcDesc == getMspTelemetryDescriptor()) {
+            dispatchAdd(&writeReadEepromEntry, MSP_DISPATCH_DELAY_US);
+        } else
 #endif
+        {
+            writeReadEeprom(NULL);
+        }
 
         break;
 
@@ -2530,12 +3335,26 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             blackboxConfigMutable()->device = sbufReadU8(src);
             const int rateNum = sbufReadU8(src); // was rate_num
             const int rateDenom = sbufReadU8(src); // was rate_denom
+            uint16_t pRatio = 0;
             if (sbufBytesRemaining(src) >= 2) {
                 // p_ratio specified, so use it directly
-                blackboxConfigMutable()->p_ratio = sbufReadU16(src);
+                pRatio = sbufReadU16(src);
             } else {
                 // p_ratio not specified in MSP, so calculate it from old rateNum and rateDenom
-                blackboxConfigMutable()->p_ratio = blackboxCalculatePDenom(rateNum, rateDenom);
+                pRatio = blackboxCalculatePDenom(rateNum, rateDenom);
+            }
+
+            if (sbufBytesRemaining(src) >= 1) {
+                // sample_rate specified, so use it directly
+                blackboxConfigMutable()->sample_rate = sbufReadU8(src);
+            } else {
+                // sample_rate not specified in MSP, so calculate it from old p_ratio
+                blackboxConfigMutable()->sample_rate = blackboxCalculateSampleRate(pRatio);
+            }
+
+            // Added in MSP API 1.45
+            if (sbufBytesRemaining(src) >= 4) {
+                blackboxConfigMutable()->fields_disabled_mask = sbufReadU32(src);
             }
         }
         break;
@@ -2632,6 +3451,9 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
                 sbufReadU8(src);
 #endif
             }
+#ifdef USE_VTX_MSP
+            setMspVtxDeviceStatusReady(srcDesc);
+#endif
         }
         break;
 #endif
@@ -2679,6 +3501,9 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             } else {
                 return MSP_RESULT_ERROR;
             }
+#ifdef USE_VTX_MSP
+            setMspVtxDeviceStatusReady(srcDesc);
+#endif
         }
         break;
 
@@ -2703,6 +3528,64 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             } else {
                 return MSP_RESULT_ERROR;
             }
+#ifdef USE_VTX_MSP
+            setMspVtxDeviceStatusReady(srcDesc);
+#endif
+        }
+        break;
+#endif
+
+    case MSP2_SET_MOTOR_OUTPUT_REORDERING:
+        {
+            const uint8_t arraySize = sbufReadU8(src);
+
+            for (unsigned i = 0; i < MAX_SUPPORTED_MOTORS; i++) {
+                uint8_t value = i;
+
+                if (i < arraySize) {
+                    value = sbufReadU8(src);
+                }
+
+                motorConfigMutable()->dev.motorOutputReordering[i] = value;
+            }
+        }
+        break;
+
+#ifdef USE_DSHOT
+    case MSP2_SEND_DSHOT_COMMAND:
+        {
+            const bool armed = ARMING_FLAG(ARMED);
+
+            if (!armed) {
+                const uint8_t commandType = sbufReadU8(src);
+                const uint8_t motorIndex = sbufReadU8(src);
+                const uint8_t commandCount = sbufReadU8(src);
+
+                if (DSHOT_CMD_TYPE_BLOCKING == commandType) {
+                    motorDisable();
+                }
+
+                for (uint8_t i = 0; i < commandCount; i++) {
+                    const uint8_t commandIndex = sbufReadU8(src);
+                    dshotCommandWrite(motorIndex, getMotorCount(), commandIndex, commandType);
+                }
+
+                if (DSHOT_CMD_TYPE_BLOCKING == commandType) {
+                    motorEnable();
+                }
+            }
+        }
+        break;
+#endif
+
+#ifdef USE_SIMPLIFIED_TUNING
+    // Added in MSP API 1.44
+    case MSP_SET_SIMPLIFIED_TUNING:
+        {
+            readSimplifiedPids(currentPidProfile, src);
+            readSimplifiedDtermFilters(currentPidProfile, src);
+            readSimplifiedGyroFilters(gyroConfigMutable(), src);
+            applySimplifiedTuning(currentPidProfile, gyroConfigMutable());
         }
         break;
 #endif
@@ -2731,36 +3614,66 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
                 disableRunawayTakeoff = sbufReadU8(src);
             }
             if (command) {
+#ifndef SIMULATOR_BUILD // In simulator mode we can safely arm with MSP link.
+                mspArmingDisableByDescriptor(srcDesc);
                 setArmingDisabled(ARMING_DISABLED_MSP);
                 if (ARMING_FLAG(ARMED)) {
-                    disarm();
+                    disarm(DISARM_REASON_ARMING_DISABLED);
                 }
+#endif
 #ifdef USE_RUNAWAY_TAKEOFF
                 runawayTakeoffTemporaryDisable(false);
 #endif
             } else {
-                unsetArmingDisabled(ARMING_DISABLED_MSP);
+                mspArmingEnableByDescriptor(srcDesc);
+                if (mspIsMspArmingEnabled()) {
+                    unsetArmingDisabled(ARMING_DISABLED_MSP);
 #ifdef USE_RUNAWAY_TAKEOFF
-                runawayTakeoffTemporaryDisable(disableRunawayTakeoff);
+                    runawayTakeoffTemporaryDisable(disableRunawayTakeoff);
 #endif
+                }
             }
         }
         break;
 
-#ifdef USE_FLASHFS
+#if defined(USE_FLASHFS) && defined(USE_BLACKBOX)
     case MSP_DATAFLASH_ERASE:
-        flashfsEraseCompletely();
+        blackboxEraseAll();
 
         break;
 #endif
 
 #ifdef USE_GPS
+    case MSP2_SENSOR_GPS:
+        (void)sbufReadU8(src);              // instance
+        (void)sbufReadU16(src);             // gps_week
+        gpsSol.time = sbufReadU32(src);     // ms_tow
+        gpsSetFixState(sbufReadU8(src) != 0); // fix_type
+        gpsSol.numSat = sbufReadU8(src);    // satellites_in_view
+        gpsSol.acc.hAcc = sbufReadU16(src) * 10; // horizontal_pos_accuracy - convert cm to mm
+        gpsSol.acc.vAcc = sbufReadU16(src) * 10; // vertical_pos_accuracy - convert cm to mm
+        gpsSol.acc.sAcc = sbufReadU16(src) * 10; // horizontal_vel_accuracy - convert cm to mm
+        gpsSol.dop.pdop = sbufReadU16(src); // hdop in 4.4 and earlier, pdop in 4.5 and above
+        gpsSol.llh.lon = sbufReadU32(src);
+        gpsSol.llh.lat = sbufReadU32(src);
+        gpsSol.llh.altCm = sbufReadU32(src); // alt
+        int32_t ned_vel_north = (int32_t)sbufReadU32(src);  // ned_vel_north
+        int32_t ned_vel_east = (int32_t)sbufReadU32(src);   // ned_vel_east
+        gpsSol.groundSpeed = (uint16_t)sqrtf((ned_vel_north * ned_vel_north) + (ned_vel_east * ned_vel_east));
+        (void)sbufReadU32(src);             // ned_vel_down
+        gpsSol.groundCourse = ((uint16_t)sbufReadU16(src) % 36000) / 10; // incoming value expected to be in centidegrees, output value in decidegrees
+        (void)sbufReadU16(src);             // true_yaw
+        (void)sbufReadU16(src);             // year
+        (void)sbufReadU8(src);              // month
+        (void)sbufReadU8(src);              // day
+        (void)sbufReadU8(src);              // hour
+        (void)sbufReadU8(src);              // min
+        (void)sbufReadU8(src);              // sec
+        GPS_update |= GPS_MSP_UPDATE;        // MSP data signalisation to GPS functions
+        break;
+
     case MSP_SET_RAW_GPS:
-        if (sbufReadU8(src)) {
-            ENABLE_STATE(GPS_FIX);
-        } else {
-            DISABLE_STATE(GPS_FIX);
-        }
+        gpsSetFixState(sbufReadU8(src));
         gpsSol.numSat = sbufReadU8(src);
         gpsSol.llh.lat = sbufReadU32(src);
         gpsSol.llh.lon = sbufReadU32(src);
@@ -2770,11 +3683,7 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         break;
 #endif // USE_GPS
     case MSP_SET_FEATURE_CONFIG:
-        featureMaskCopy = sbufReadU32(src);
-        if (!featureMaskIsCopied) {
-            featureMaskIsCopied = true;
-        }
-
+        featureConfigReplace(sbufReadU32(src));
         break;
 
 #ifdef USE_BEEPER
@@ -2817,8 +3726,8 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             rxConfigMutable()->rx_max_usec = sbufReadU16(src);
         }
         if (sbufBytesRemaining(src) >= 4) {
-            rxConfigMutable()->rcInterpolation = sbufReadU8(src);
-            rxConfigMutable()->rcInterpolationInterval = sbufReadU8(src);
+            sbufReadU8(src); // not required in API 1.44, was rxConfigMutable()->rcInterpolation
+            sbufReadU8(src); // not required in API 1.44, was rxConfigMutable()->rcInterpolationInterval
             rxConfigMutable()->airModeActivateThreshold = (sbufReadU16(src) - 1000) / 10;
         }
         if (sbufBytesRemaining(src) >= 6) {
@@ -2837,13 +3746,13 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         }
         if (sbufBytesRemaining(src) >= 6) {
             // Added in MSP API 1.40
-            rxConfigMutable()->rcInterpolationChannels = sbufReadU8(src);
+            sbufReadU8(src); // not required in API 1.44, was rxConfigMutable()->rcSmoothingChannels
 #if defined(USE_RC_SMOOTHING_FILTER)
-            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_type, sbufReadU8(src));
-            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_input_cutoff, sbufReadU8(src));
-            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_derivative_cutoff, sbufReadU8(src));
-            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_input_type, sbufReadU8(src));
-            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_derivative_type, sbufReadU8(src));
+            sbufReadU8(src); // not required in API 1.44, was rc_smoothing_type
+            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_setpoint_cutoff, sbufReadU8(src));
+            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_feedforward_cutoff, sbufReadU8(src));
+            sbufReadU8(src); // not required in API 1.44, was rc_smoothing_input_type
+            sbufReadU8(src); // not required in API 1.44, was rc_smoothing_derivative_type
 #else
             sbufReadU8(src);
             sbufReadU8(src);
@@ -2864,16 +3773,44 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         if (sbufBytesRemaining(src) >= 1) {
             // Added in MSP API 1.42
 #if defined(USE_RC_SMOOTHING_FILTER)
-            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_auto_factor, sbufReadU8(src));
+            // Added extra validation/range constraint for rc_smoothing_auto_factor as a workaround for a bug in
+            // the 10.6 configurator where it was possible to submit an invalid out-of-range value. We might be
+            // able to remove the constraint at some point in the future once the affected versions are deprecated
+            // enough that the risk is low.
+            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_auto_factor_rpy, constrain(sbufReadU8(src), RC_SMOOTHING_AUTO_FACTOR_MIN, RC_SMOOTHING_AUTO_FACTOR_MAX));
 #else
             sbufReadU8(src);
 #endif
         }
-
+        if (sbufBytesRemaining(src) >= 1) {
+            // Added in MSP API 1.44
+#if defined(USE_RC_SMOOTHING_FILTER)
+            configRebootUpdateCheckU8(&rxConfigMutable()->rc_smoothing_mode, sbufReadU8(src));
+#else
+            sbufReadU8(src);
+#endif
+        }
+        if (sbufBytesRemaining(src) >= 6) {
+            // Added in MSP API 1.45
+#ifdef USE_RX_EXPRESSLRS
+            sbufReadData(src, rxExpressLrsSpiConfigMutable()->UID, 6);
+#else
+            uint8_t emptyUid[6];
+            sbufReadData(src, emptyUid, 6);
+#endif
+        }
+        if (sbufBytesRemaining(src) >= 1) {
+#ifdef USE_RX_EXPRESSLRS
+            // Added in MSP API 1.47
+            rxExpressLrsSpiConfigMutable()->modelId = sbufReadU8(src);
+#else
+            sbufReadU8(src);
+#endif
+        }
         break;
     case MSP_SET_FAILSAFE_CONFIG:
         failsafeConfigMutable()->failsafe_delay = sbufReadU8(src);
-        failsafeConfigMutable()->failsafe_off_delay = sbufReadU8(src);
+        failsafeConfigMutable()->failsafe_landing_time = sbufReadU8(src);
         failsafeConfigMutable()->failsafe_throttle = sbufReadU16(src);
         failsafeConfigMutable()->failsafe_switch_mode = sbufReadU8(src);
         failsafeConfigMutable()->failsafe_throttle_low_delay = sbufReadU16(src);
@@ -2913,7 +3850,8 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             while (remainingPortsInPacket--) {
                 uint8_t identifier = sbufReadU8(src);
 
-                serialPortConfig_t *portConfig = serialFindPortConfiguration(identifier);
+                serialPortConfig_t *portConfig = serialFindPortConfigurationMutable(identifier);
+
                 if (!portConfig) {
                     return MSP_RESULT_ERROR;
                 }
@@ -2927,6 +3865,38 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             }
         }
         break;
+    case MSP2_COMMON_SET_SERIAL_CONFIG: {
+        if (dataSize < 1) {
+            return MSP_RESULT_ERROR;
+        }
+        unsigned count = sbufReadU8(src);
+        unsigned portConfigSize = (dataSize - 1) / count;
+        unsigned expectedPortSize = sizeof(uint8_t) + sizeof(uint32_t) + (sizeof(uint8_t) * 4);
+        if (portConfigSize < expectedPortSize) {
+            return MSP_RESULT_ERROR;
+        }
+        for (unsigned ii = 0; ii < count; ii++) {
+            unsigned start = sbufBytesRemaining(src);
+            uint8_t identifier = sbufReadU8(src);
+            serialPortConfig_t *portConfig = serialFindPortConfigurationMutable(identifier);
+
+            if (!portConfig) {
+                return MSP_RESULT_ERROR;
+            }
+
+            portConfig->identifier = identifier;
+            portConfig->functionMask = sbufReadU32(src);
+            portConfig->msp_baudrateIndex = sbufReadU8(src);
+            portConfig->gps_baudrateIndex = sbufReadU8(src);
+            portConfig->telemetry_baudrateIndex = sbufReadU8(src);
+            portConfig->blackbox_baudrateIndex = sbufReadU8(src);
+            // Skip unknown bytes
+            while (start - sbufBytesRemaining(src) < portConfigSize && sbufBytesRemaining(src)) {
+                sbufReadU8(src);
+            }
+        }
+        break;
+    }
 
 #ifdef USE_LED_STRIP_STATUS_MODE
     case MSP_SET_LED_COLORS:
@@ -2943,7 +3913,7 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
     case MSP_SET_LED_STRIP_CONFIG:
         {
             i = sbufReadU8(src);
-            if (i >= LED_MAX_STRIP_LENGTH || dataSize != (1 + 4)) {
+            if (i >= LED_STRIP_MAX_LENGTH || dataSize != (1 + 4)) {
                 return MSP_RESULT_ERROR;
             }
 #ifdef USE_LED_STRIP_STATUS_MODE
@@ -2976,10 +3946,13 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
 #endif
 
     case MSP_SET_NAME:
-        memset(pilotConfigMutable()->name, 0, ARRAYLEN(pilotConfig()->name));
+        memset(pilotConfigMutable()->craftName, 0, ARRAYLEN(pilotConfig()->craftName));
         for (unsigned int i = 0; i < MIN(MAX_NAME_LENGTH, dataSize); i++) {
-            pilotConfigMutable()->name[i] = sbufReadU8(src);
+            pilotConfigMutable()->craftName[i] = sbufReadU8(src);
         }
+#ifdef USE_OSD
+        osdAnalyzeActiveElements();
+#endif
         break;
 
 #ifdef USE_RTC_TIME
@@ -3010,6 +3983,7 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             sbufReadData(src, boardName, MIN(length, MAX_BOARD_NAME_LENGTH));
             if (length > MAX_BOARD_NAME_LENGTH) {
                 sbufAdvance(src, length - MAX_BOARD_NAME_LENGTH);
+                length = MAX_BOARD_NAME_LENGTH;
             }
             boardName[length] = '\0';
             length = sbufReadU8(src);
@@ -3017,6 +3991,7 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             sbufReadData(src, manufacturerId, MIN(length, MAX_MANUFACTURER_ID_LENGTH));
             if (length > MAX_MANUFACTURER_ID_LENGTH) {
                 sbufAdvance(src, length - MAX_MANUFACTURER_ID_LENGTH);
+                length = MAX_MANUFACTURER_ID_LENGTH;
             }
             manufacturerId[length] = '\0';
 
@@ -3042,6 +4017,64 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
         break;
 #endif
 #endif // USE_BOARD_INFO
+#if defined(USE_RX_BIND)
+    case MSP2_BETAFLIGHT_BIND:
+        if (!startRxBind()) {
+            return MSP_RESULT_ERROR;
+        }
+
+        break;
+#endif
+
+    case MSP2_SET_TEXT:
+        {
+            // type byte, then length byte followed by the actual characters
+            const uint8_t textType = sbufReadU8(src);
+
+            char* textVar;
+            const uint8_t textLength = MIN(MAX_NAME_LENGTH, sbufReadU8(src));
+            switch (textType) {
+                case MSP2TEXT_PILOT_NAME:
+                    textVar = pilotConfigMutable()->pilotName;
+                    break;
+
+                case MSP2TEXT_CRAFT_NAME:
+                    textVar = pilotConfigMutable()->craftName;
+                    break;
+
+                case MSP2TEXT_PID_PROFILE_NAME:
+                    textVar = currentPidProfile->profileName;
+                    break;
+
+                case MSP2TEXT_RATE_PROFILE_NAME:
+                    textVar = currentControlRateProfile->profileName;
+                    break;
+
+                default:
+                    return MSP_RESULT_ERROR;
+            }
+
+            memset(textVar, 0, strlen(textVar));
+            for (unsigned int i = 0; i < textLength; i++) {
+                textVar[i] = sbufReadU8(src);
+            }
+
+#ifdef USE_OSD
+            if (textType == MSP2TEXT_PILOT_NAME || textType == MSP2TEXT_CRAFT_NAME) {
+                osdAnalyzeActiveElements();
+            }
+#endif
+        }
+        break;
+
+#ifdef USE_LED_STRIP
+    case MSP2_SET_LED_STRIP_CONFIG_VALUES:
+        ledStripConfigMutable()->ledstrip_brightness = sbufReadU8(src);
+        ledStripConfigMutable()->ledstrip_rainbow_delta = sbufReadU16(src);
+        ledStripConfigMutable()->ledstrip_rainbow_freq = sbufReadU16(src);
+        break;
+#endif
+
     default:
         // we do not know how to handle the (valid) message, indicate error MSP $M!
         return MSP_RESULT_ERROR;
@@ -3049,7 +4082,7 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
     return MSP_RESULT_ACK;
 }
 
-static mspResult_e mspCommonProcessInCommand(uint8_t cmdMSP, sbuf_t *src, mspPostProcessFnPtr *mspPostProcessFn)
+static mspResult_e mspCommonProcessInCommand(mspDescriptor_t srcDesc, int16_t cmdMSP, sbuf_t *src, mspPostProcessFnPtr *mspPostProcessFn)
 {
     UNUSED(mspPostProcessFn);
     const unsigned int dataSize = sbufBytesRemaining(src);
@@ -3163,12 +4196,35 @@ static mspResult_e mspCommonProcessInCommand(uint8_t cmdMSP, sbuf_t *src, mspPos
 
             if ((int8_t)addr == -1) {
                 /* Set general OSD settings */
-#ifdef USE_MAX7456
-                vcdProfileMutable()->video_system = sbufReadU8(src);
+                videoSystem_e video_system = sbufReadU8(src);
+
+                if ((video_system == VIDEO_SYSTEM_HD) && (vcdProfile()->video_system != VIDEO_SYSTEM_HD)) {
+                    // If switching to HD, don't wait for the VTX to communicate the correct resolution, just
+#ifdef USE_OSD_HD
+                    // If an HD build, increase the canvas size to the HD default as that is what the user will expect
+                    osdConfigMutable()->canvas_cols = OSD_HD_COLS;
+                    osdConfigMutable()->canvas_rows = OSD_HD_ROWS;
+                    // Also force use of MSP displayport
+                    osdConfigMutable()->displayPortDevice = OSD_DISPLAYPORT_DEVICE_MSP;
 #else
-                sbufReadU8(src); // Skip video system
+                    // must have an SD build option, keep existing SD video_system, do not change canvas size
+                    video_system = vcdProfile()->video_system;
 #endif
-#if defined(USE_OSD)
+                } else if ((video_system != VIDEO_SYSTEM_HD) && (vcdProfile()->video_system == VIDEO_SYSTEM_HD)) {
+                    // Switching away from HD to SD
+#ifdef USE_OSD_SD
+                    // SD is in the build; set canvas size to SD and displayport device to auto
+                    osdConfigMutable()->canvas_cols = OSD_SD_COLS;
+                    osdConfigMutable()->canvas_rows = (video_system == VIDEO_SYSTEM_NTSC) ? VIDEO_LINES_NTSC : VIDEO_LINES_PAL;
+                    osdConfigMutable()->displayPortDevice = OSD_DISPLAYPORT_DEVICE_AUTO;
+#else
+                    // must have an HD build option, keep existing HD video_system, do not change canvas size
+                    video_system = VIDEO_SYSTEM_HD;
+#endif
+                }
+
+                vcdProfileMutable()->video_system = video_system;
+
                 osdConfigMutable()->units = sbufReadU8(src);
 
                 // Alarms
@@ -3209,19 +4265,32 @@ static mspResult_e mspCommonProcessInCommand(uint8_t cmdMSP, sbuf_t *src, mspPos
 #endif // USE_OSD_STICK_OVERLAY
 
                 }
-#endif
+
+                if (sbufBytesRemaining(src) >= 2) {
+                    // API >= 1.43
+                    // OSD camera frame element width/height
+                    osdConfigMutable()->camera_frame_width = sbufReadU8(src);
+                    osdConfigMutable()->camera_frame_height = sbufReadU8(src);
+                }
+
+                if (sbufBytesRemaining(src) >= 2) {
+                    // API >= 1.46
+                    osdConfigMutable()->link_quality_alarm = sbufReadU16(src);
+                }
+
+                if (sbufBytesRemaining(src) >= 2) {
+                    // API >= 1.47
+                    osdConfigMutable()->rssi_dbm_alarm = sbufReadU16(src);
+                }
+
             } else if ((int8_t)addr == -2) {
-#if defined(USE_OSD)
                 // Timers
                 uint8_t index = sbufReadU8(src);
                 if (index > OSD_TIMER_COUNT) {
-                  return MSP_RESULT_ERROR;
+                    return MSP_RESULT_ERROR;
                 }
                 osdConfigMutable()->timers[index] = sbufReadU16(src);
-#endif
-                return MSP_RESULT_ERROR;
             } else {
-#if defined(USE_OSD)
                 const uint16_t value = sbufReadU16(src);
 
                 /* Get screen index, 0 is post flight statistics, 1 and above are in flight OSD screens */
@@ -3232,37 +4301,77 @@ static mspResult_e mspCommonProcessInCommand(uint8_t cmdMSP, sbuf_t *src, mspPos
                     osdStatSetState(addr, (value != 0));
                 } else if (addr < OSD_ITEM_COUNT) {
                     /* Set element positions */
-                    osdConfigMutable()->item_pos[addr] = value;
+                    osdElementConfigMutable()->item_pos[addr] = value;
                     osdAnalyzeActiveElements();
                 } else {
-                  return MSP_RESULT_ERROR;
+                    return MSP_RESULT_ERROR;
                 }
-#else
-                return MSP_RESULT_ERROR;
-#endif
             }
         }
         break;
 
     case MSP_OSD_CHAR_WRITE:
-#ifdef USE_MAX7456
         {
-            uint8_t font_data[64];
-            const uint8_t addr = sbufReadU8(src);
-            for (int i = 0; i < 54; i++) {
-                font_data[i] = sbufReadU8(src);
+            osdCharacter_t chr;
+            size_t osdCharacterBytes;
+            uint16_t addr;
+            if (dataSize >= OSD_CHAR_VISIBLE_BYTES + 2) {
+                if (dataSize >= OSD_CHAR_BYTES + 2) {
+                    // 16 bit address, full char with metadata
+                    addr = sbufReadU16(src);
+                    osdCharacterBytes = OSD_CHAR_BYTES;
+                } else if (dataSize >= OSD_CHAR_BYTES + 1) {
+                    // 8 bit address, full char with metadata
+                    addr = sbufReadU8(src);
+                    osdCharacterBytes = OSD_CHAR_BYTES;
+                } else {
+                    // 16 bit character address, only visible char bytes
+                    addr = sbufReadU16(src);
+                    osdCharacterBytes = OSD_CHAR_VISIBLE_BYTES;
+                }
+            } else {
+                // 8 bit character address, only visible char bytes
+                addr = sbufReadU8(src);
+                osdCharacterBytes = OSD_CHAR_VISIBLE_BYTES;
             }
-            // !!TODO - replace this with a device independent implementation
-            max7456WriteNvm(addr, font_data);
+            for (unsigned ii = 0; ii < MIN(osdCharacterBytes, sizeof(chr.data)); ii++) {
+                chr.data[ii] = sbufReadU8(src);
+            }
+            displayPort_t *osdDisplayPort = osdGetDisplayPort(NULL);
+            if (!osdDisplayPort) {
+                return MSP_RESULT_ERROR;
+            }
+
+            if (!displayWriteFontCharacter(osdDisplayPort, addr, &chr)) {
+                return MSP_RESULT_ERROR;
+            }
         }
         break;
-#else
-        return MSP_RESULT_ERROR;
-#endif
+
+#ifdef USE_OSD_HD
+    case MSP_SET_OSD_CANVAS:
+        {
+            osdConfigMutable()->canvas_cols = sbufReadU8(src);
+            osdConfigMutable()->canvas_rows = sbufReadU8(src);
+
+            if ((vcdProfile()->video_system != VIDEO_SYSTEM_HD) ||
+                (osdConfig()->displayPortDevice != OSD_DISPLAYPORT_DEVICE_MSP)) {
+                // An HD VTX has communicated it's canvas size, so we must be in HD mode
+                vcdProfileMutable()->video_system = VIDEO_SYSTEM_HD;
+                // And using MSP displayport
+                osdConfigMutable()->displayPortDevice = OSD_DISPLAYPORT_DEVICE_MSP;
+
+                // Save settings and reboot or the user won't see the effect and will have to manually save
+                writeEEPROM();
+                systemReset();
+            }
+        }
+        break;
+#endif //USE_OSD_HD
 #endif // OSD
 
     default:
-        return mspProcessInCommand(cmdMSP, src);
+        return mspProcessInCommand(srcDesc, cmdMSP, src);
     }
     return MSP_RESULT_ACK;
 }
@@ -3270,33 +4379,31 @@ static mspResult_e mspCommonProcessInCommand(uint8_t cmdMSP, sbuf_t *src, mspPos
 /*
  * Returns MSP_RESULT_ACK, MSP_RESULT_ERROR or MSP_RESULT_NO_REPLY
  */
-mspResult_e mspFcProcessCommand(mspPacket_t *cmd, mspPacket_t *reply, mspPostProcessFnPtr *mspPostProcessFn)
+mspResult_e mspFcProcessCommand(mspDescriptor_t srcDesc, mspPacket_t *cmd, mspPacket_t *reply, mspPostProcessFnPtr *mspPostProcessFn)
 {
     int ret = MSP_RESULT_ACK;
     sbuf_t *dst = &reply->buf;
     sbuf_t *src = &cmd->buf;
-    const uint8_t cmdMSP = cmd->cmd;
+    const int16_t cmdMSP = cmd->cmd;
     // initialize reply by default
     reply->cmd = cmd->cmd;
 
     if (mspCommonProcessOutCommand(cmdMSP, dst, mspPostProcessFn)) {
         ret = MSP_RESULT_ACK;
-    } else if (mspProcessOutCommand(cmdMSP, dst)) {
+    } else if (mspProcessOutCommand(srcDesc, cmdMSP, dst)) {
         ret = MSP_RESULT_ACK;
-    } else if ((ret = mspFcProcessOutCommandWithArg(cmdMSP, src, dst, mspPostProcessFn)) != MSP_RESULT_CMD_UNKNOWN) {
+    } else if ((ret = mspFcProcessOutCommandWithArg(srcDesc, cmdMSP, src, dst, mspPostProcessFn)) != MSP_RESULT_CMD_UNKNOWN) {
         /* ret */;
-#ifdef USE_SERIAL_4WAY_BLHELI_INTERFACE
-    } else if (cmdMSP == MSP_SET_4WAY_IF) {
-        mspFc4waySerialCommand(dst, src, mspPostProcessFn);
+    } else if (cmdMSP == MSP_SET_PASSTHROUGH) {
+        mspFcSetPassthroughCommand(dst, src, mspPostProcessFn);
         ret = MSP_RESULT_ACK;
-#endif
 #ifdef USE_FLASHFS
     } else if (cmdMSP == MSP_DATAFLASH_READ) {
         mspFcDataFlashReadCommand(dst, src);
         ret = MSP_RESULT_ACK;
 #endif
     } else {
-        ret = mspCommonProcessInCommand(cmdMSP, src, mspPostProcessFn);
+        ret = mspCommonProcessInCommand(srcDesc, cmdMSP, src, mspPostProcessFn);
     }
     reply->result = ret;
     return ret;

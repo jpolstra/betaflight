@@ -47,19 +47,23 @@ typedef enum {
 } mspDirection_e;
 
 typedef struct mspPacket_s {
-    sbuf_t buf;
+    sbuf_t buf;         // payload only w/o header or crc
     int16_t cmd;
-    uint8_t flags;
     int16_t result;
-    uint8_t direction;
+    uint8_t flags;      // MSPv2 flags byte. It looks like unused (yet?).
+    uint8_t direction;  // It also looks like unused and might be deleted.
 } mspPacket_t;
+
+typedef int mspDescriptor_t;
 
 struct serialPort_s;
 typedef void (*mspPostProcessFnPtr)(struct serialPort_s *port); // msp post process function, used for gracefully handling reboots, etc.
-typedef mspResult_e (*mspProcessCommandFnPtr)(mspPacket_t *cmd, mspPacket_t *reply, mspPostProcessFnPtr *mspPostProcessFn);
+typedef mspResult_e (*mspProcessCommandFnPtr)(mspDescriptor_t srcDesc, mspPacket_t *cmd, mspPacket_t *reply, mspPostProcessFnPtr *mspPostProcessFn);
 typedef void (*mspProcessReplyFnPtr)(mspPacket_t *cmd);
 
 
 void mspInit(void);
-mspResult_e mspFcProcessCommand(mspPacket_t *cmd, mspPacket_t *reply, mspPostProcessFnPtr *mspPostProcessFn);
+mspResult_e mspFcProcessCommand(mspDescriptor_t srcDesc, mspPacket_t *cmd, mspPacket_t *reply, mspPostProcessFnPtr *mspPostProcessFn);
 void mspFcProcessReply(mspPacket_t *reply);
+
+mspDescriptor_t mspDescriptorAlloc(void);

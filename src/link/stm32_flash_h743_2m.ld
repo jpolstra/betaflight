@@ -22,8 +22,8 @@ ENTRY(Reset_Handler)
 0x00000000 to 0x0000FFFF   64K ITCM
 0x20000000 to 0x2001FFFF  128K DTCM
 0x24000000 to 0x2407FFFF  512K AXI SRAM, D1 domain, main RAM
-0x30000000 to 0x3001FFFF  128K SRAM1, D2 domain, unused
-0x30020000 to 0x3003FFFF  128K SRAM2, D2 domain, unused
+0x30000000 to 0x3001FFFF  128K SRAM1, D2 domain
+0x30020000 to 0x3003FFFF  128K SRAM2, D2 domain
 0x30040000 to 0x30047FFF   32K SRAM3, D2 domain, unused
 0x38000000 to 0x3800FFFF   64K SRAM4, D3 domain, unused
 0x38800000 to 0x38800FFF    4K BACKUP SRAM, Backup domain, unused
@@ -52,17 +52,6 @@ MEMORY
 
 REGION_ALIAS("STACKRAM", DTCM_RAM)
 REGION_ALIAS("FASTRAM", DTCM_RAM)
-
-/* INCLUDE "stm32_flash_f7_split.ld" */
-/*
-*****************************************************************************
-**
-**  File        : stm32_flash_f7_split.ld
-**
-**  Abstract    : Common linker script for STM32 devices.
-**
-*****************************************************************************
-*/
 
 /* Entry Point */
 ENTRY(Reset_Handler)
@@ -110,28 +99,28 @@ SECTIONS
   } >FLASH1
 
   /* Critical program code goes into ITCM RAM */
-  /* Copy specific fast-executing code to ITCM RAM */ 
-  tcm_code = LOADADDR(.tcm_code); 
+  /* Copy specific fast-executing code to ITCM RAM */
+  tcm_code = LOADADDR(.tcm_code);
   .tcm_code :
   {
     . = ALIGN(4);
-    tcm_code_start = .; 
+    tcm_code_start = .;
     *(.tcm_code)
     *(.tcm_code*)
     . = ALIGN(4);
-    tcm_code_end = .; 
+    tcm_code_end = .;
   } >ITCM_RAM AT >FLASH1
 
-  .ARM.extab   : 
-  { 
-    *(.ARM.extab* .gnu.linkonce.armextab.*) 
-  } >FLASH
-  
-  .ARM : 
+  .ARM.extab   :
+  {
+    *(.ARM.extab* .gnu.linkonce.armextab.*)
+  } >FLASH1
+
+  .ARM :
   {
     __exidx_start = .;
     *(.ARM.exidx*) __exidx_end = .;
-  } >FLASH
+  } >FLASH1
 
   .pg_registry :
   {
@@ -139,14 +128,14 @@ SECTIONS
     KEEP (*(.pg_registry))
     KEEP (*(SORT(.pg_registry.*)))
     PROVIDE_HIDDEN (__pg_registry_end = .);
-  } >FLASH
-  
+  } >FLASH1
+
   .pg_resetdata :
   {
     PROVIDE_HIDDEN (__pg_resetdata_start = .);
     KEEP (*(.pg_resetdata))
     PROVIDE_HIDDEN (__pg_resetdata_end = .);
-  } >FLASH
+  } >FLASH1
 
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
@@ -161,7 +150,7 @@ SECTIONS
 
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */
-  } >RAM AT >FLASH
+  } >RAM AT >FLASH1
 
   /* Uninitialized data section */
   . = ALIGN(4);
@@ -197,7 +186,7 @@ SECTIONS
   /* used during startup to initialized fastram_data */
   _sfastram_idata = LOADADDR(.fastram_data);
 
-  /* Initialized FAST_RAM section for unsuspecting developers */
+  /* Initialized FAST_DATA section for unsuspecting developers */
   .fastram_data :
   {
     . = ALIGN(4);
@@ -207,7 +196,7 @@ SECTIONS
 
     . = ALIGN(4);
     _efastram_data = .;        /* define a global symbol at data end */
-  } >FASTRAM AT >FLASH
+  } >FASTRAM AT >FLASH1
 
   . = ALIGN(4);
   .fastram_bss (NOLOAD) :
@@ -222,17 +211,42 @@ SECTIONS
     __fastram_bss_end__ = _efastram_bss;
   } >FASTRAM
 
-  .DMA_RAM (NOLOAD) :
+  /* used during startup to initialized dmaram_data */
+  _sdmaram_idata = LOADADDR(.dmaram_data);
+
+  . = ALIGN(32);
+  .dmaram_data :
   {
-    . = ALIGN(32);
     PROVIDE(dmaram_start = .);
     _sdmaram = .;
     _dmaram_start__ = _sdmaram;
+    _sdmaram_data = .;        /* create a global symbol at data start */
+    *(.dmaram_data)           /* .data sections */
+    *(.dmaram_data*)          /* .data* sections */
+    . = ALIGN(32);
+    _edmaram_data = .;        /* define a global symbol at data end */
+  } >RAM AT >FLASH1
+
+  . = ALIGN(32);
+  .dmaram_bss (NOLOAD) :
+  {
+    _sdmaram_bss = .;
+    __dmaram_bss_start__ = _sdmaram_bss;
+    *(.dmaram_bss)
+    *(SORT_BY_ALIGNMENT(.dmaram_bss*))
+    . = ALIGN(32);
+    _edmaram_bss = .;
+    __dmaram_bss_end__ = _edmaram_bss;
+  } >RAM
+
+  . = ALIGN(32);
+  .DMA_RAM (NOLOAD) :
+  {
     KEEP(*(.DMA_RAM))
     PROVIDE(dmaram_end = .);
     _edmaram = .;
     _dmaram_end__ = _edmaram;
-  } >D2_RAM
+  } >RAM
 
   .DMA_RW_D2 (NOLOAD) :
   {

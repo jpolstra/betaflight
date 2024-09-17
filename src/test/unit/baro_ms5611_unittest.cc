@@ -146,28 +146,40 @@ extern "C" {
 void delay(uint32_t) {}
 void delayMicroseconds(uint32_t) {}
 
-bool busBusy(const busDevice_t*, bool*) {return false;}
-bool busReadRegisterBuffer(const busDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
-bool busReadRegisterBufferStart(const busDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
-bool busWriteRegister(const busDevice_t*, uint8_t, uint8_t) {return true;}
-bool busWriteRegisterStart(const busDevice_t*, uint8_t, uint8_t) {return true;}
+bool busBusy(const extDevice_t*, bool*) {return false;}
+bool busRawReadRegisterBuffer(const extDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
+bool busRawReadRegisterBufferStart(const extDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
+bool busRawWriteRegister(const extDevice_t*, uint8_t, uint8_t) {return true;}
+bool busRawWriteRegisterStart(const extDevice_t*, uint8_t, uint8_t) {return true;}
+void busDeviceRegister(const extDevice_t*) {}
 
-void spiBusSetDivisor() {
+uint16_t spiCalculateDivider()
+{
+    return 2;
 }
 
-void spiPreinitByIO() {
+void spiSetClkDivisor()
+{
 }
 
-void IOConfigGPIO() {
+void spiPreinitByIO()
+{
 }
 
-void IOHi() {
+void IOConfigGPIO()
+{
 }
 
-void IOInit() {
+void IOHi()
+{
 }
 
-void IORelease() {
+void IOInit()
+{
+}
+
+void IORelease()
+{
 }
 
 }

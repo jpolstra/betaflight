@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include <ctype.h>
 
 #include "platform.h"
@@ -127,12 +128,15 @@ static smartAudioDevice_t saDevicePrev = {
 // XXX Possible compliance problem here. Need LOCK/UNLOCK menu?
 static uint8_t saLockMode = SA_MODE_SET_UNLOCK; // saCms variable?
 
-static uint8_t saSupportedNumPowerLevels = VTX_SMARTAUDIO_POWER_COUNT;
-static uint16_t saSupportedPowerValues[VTX_SMARTAUDIO_POWER_COUNT];
-#if !defined(USE_VTX_TABLE)
+#ifdef USE_VTX_TABLE
+#define VTX_SMARTAUDIO_POWER_COUNT VTX_TABLE_MAX_POWER_LEVELS
+#else // USE_VTX_TABLE
+#define VTX_SMARTAUDIO_POWER_COUNT 4
 static char saSupportedPowerLabels[VTX_SMARTAUDIO_POWER_COUNT + 1][4] = {"---", "25 ", "200", "500", "800"};
 static char *saSupportedPowerLabelPointerArray[VTX_SMARTAUDIO_POWER_COUNT + 1];
-#endif
+#endif // USE_VTX_TABLE
+static uint8_t saSupportedNumPowerLevels = VTX_SMARTAUDIO_POWER_COUNT;
+static uint16_t saSupportedPowerValues[VTX_SMARTAUDIO_POWER_COUNT];
 
 // XXX Should be configurable by user?
 bool saDeferred = true; // saCms variable?
@@ -493,18 +497,26 @@ static void saReceiveFrame(uint8_t c)
 static void saSendFrame(uint8_t *buf, int len)
 {
     if (!IS_RC_MODE_ACTIVE(BOXVTXCONTROLDISABLE)) {
+#ifndef AT32F4
         switch (smartAudioSerialPort->identifier) {
         case SERIAL_PORT_SOFTSERIAL1:
         case SERIAL_PORT_SOFTSERIAL2:
+            if (vtxSettingsConfig()->softserialAlt) {
+                serialWrite(smartAudioSerialPort, 0x00); // Generate 1st start byte
+            }
             break;
         default:
-            serialWrite(smartAudioSerialPort, 0x00); // Generate 1st start bit
+            serialWrite(smartAudioSerialPort, 0x00); // Generate 1st start byte
             break;
         }
+#endif //AT32F4
 
         for (int i = 0 ; i < len ; i++) {
             serialWrite(smartAudioSerialPort, buf[i]);
         }
+        #ifdef USE_AKK_SMARTAUDIO
+        serialWrite(smartAudioSerialPort, 0x00); // AKK/RDQ SmartAudio devices can expect an extra byte due to manufacturing errors.
+        #endif // USE_AKK_SMARTAUDIO
 
         saStat.pktsent++;
     } else {
@@ -539,7 +551,7 @@ static void saResendCmd(void)
     saSendFrame(sa_osbuf, sa_oslen);
 }
 
-static void saSendCmd(uint8_t *buf, int len)
+static void saSendCmd(const uint8_t *buf, int len)
 {
     for (int i = 0 ; i < len ; i++) {
         sa_osbuf[i] = buf[i];
@@ -693,14 +705,11 @@ bool vtxSmartAudioInit(void)
     dprintf(("smartAudioInit: OK\r\n"));
 #endif
 
-    serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_VTX_SMARTAUDIO);
+    // Note, for SA, which uses bidirectional mode, would normally require pullups. 
+    // the SA protocol instead requires pulldowns, and therefore uses SERIAL_BIDIR_PP_PD instead of SERIAL_BIDIR_PP
+    const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_VTX_SMARTAUDIO);
     if (portConfig) {
-        portOptions_e portOptions = SERIAL_STOPBITS_2 | SERIAL_BIDIR_NOPULL;
-#if defined(USE_VTX_COMMON)
-        portOptions = portOptions | (vtxConfig()->halfDuplex ? SERIAL_BIDIR | SERIAL_BIDIR_PP : SERIAL_UNIDIR);
-#else
-        portOptions = SERIAL_BIDIR;
-#endif
+        portOptions_e portOptions = SERIAL_STOPBITS_2 | SERIAL_BIDIR | SERIAL_BIDIR_PP_PD | SERIAL_BIDIR_NOPULL;
 
         smartAudioSerialPort = openSerialPort(portConfig->identifier, FUNCTION_VTX_SMARTAUDIO, NULL, NULL, 4800, MODE_RXTX, portOptions);
     }
@@ -914,7 +923,7 @@ static void vtxSASetPowerByIndex(vtxDevice_t *vtxDevice, uint8_t index)
 
 static void vtxSASetPitMode(vtxDevice_t *vtxDevice, uint8_t onoff)
 {
-    if (!(vtxSAIsReady(vtxDevice) && (saDevice.version >= 2))) {
+    if (!vtxSAIsReady(vtxDevice) || saDevice.version < 2) {
         return;
     }
 
@@ -1013,7 +1022,7 @@ static bool vtxSAGetFreq(const vtxDevice_t *vtxDevice, uint16_t *pFreq)
 
 static bool vtxSAGetStatus(const vtxDevice_t *vtxDevice, unsigned *status)
 {
-    if (!(vtxSAIsReady(vtxDevice) && (saDevice.version == 2))) {
+    if (!vtxSAIsReady(vtxDevice) || saDevice.version < 2) {
         return false;
     }
 
@@ -1021,6 +1030,41 @@ static bool vtxSAGetStatus(const vtxDevice_t *vtxDevice, unsigned *status)
 
     return true;
 }
+
+static uint8_t vtxSAGetPowerLevels(const vtxDevice_t *vtxDevice, uint16_t *levels, uint16_t *powers)
+{
+    if (!vtxSAIsReady(vtxDevice) || saDevice.version < 2) {
+        return 0;
+    }
+
+    for (uint8_t i = 0; i < saSupportedNumPowerLevels; i++) {
+        levels[i] = saSupportedPowerValues[i];
+        uint16_t power = (uint16_t)powf(10.0f, levels[i] / 10.0f);
+
+        if (levels[i] > 14) {
+            // For powers greater than 25mW round up to a multiple of 50 to match expectations
+            power = 50 * ((power + 25) / 50);
+        }
+
+        powers[i] = power;
+    }
+
+    return saSupportedNumPowerLevels;
+}
+
+#define VTX_CUSTOM_DEVICE_STATUS_SIZE 5
+
+static void vtxSASerializeCustomDeviceStatus(const vtxDevice_t *vtxDevice, sbuf_t *dst)
+{
+    UNUSED(vtxDevice);
+    sbufWriteU8(dst, VTX_CUSTOM_DEVICE_STATUS_SIZE);
+    sbufWriteU8(dst, saDevice.version);
+    sbufWriteU8(dst, saDevice.mode);
+    sbufWriteU16(dst, saDevice.orfreq); // pit frequency
+    sbufWriteU8(dst, saDevice.willBootIntoPitMode);
+}
+
+#undef VTX_CUSTOM_DEVICE_STATUS_SIZE
 
 static const vtxVTable_t saVTable = {
     .process = vtxSAProcess,
@@ -1034,6 +1078,8 @@ static const vtxVTable_t saVTable = {
     .getPowerIndex = vtxSAGetPowerIndex,
     .getFrequency = vtxSAGetFreq,
     .getStatus = vtxSAGetStatus,
+    .getPowerLevels = vtxSAGetPowerLevels,
+    .serializeCustomDeviceStatus = vtxSASerializeCustomDeviceStatus,
 };
 #endif // VTX_COMMON
 

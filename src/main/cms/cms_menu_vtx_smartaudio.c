@@ -37,7 +37,7 @@
 
 #include "drivers/vtx_common.h"
 
-#include "fc/config.h"
+#include "config/config.h"
 
 #include "io/vtx_smartaudio.h"
 #include "io/vtx.h"
@@ -121,12 +121,12 @@ char saCmsStatusString[31] = "- -- ---- ---";
 //                            m bc ffff ppp
 //                            0123456789012
 
-static long saCmsConfigOpmodelByGvar(displayPort_t *, const void *self);
-static long saCmsConfigPitFModeByGvar(displayPort_t *, const void *self);
-static long saCmsConfigBandByGvar(displayPort_t *, const void *self);
-static long saCmsConfigChanByGvar(displayPort_t *, const void *self);
-static long saCmsConfigPowerByGvar(displayPort_t *, const void *self);
-static long saCmsConfigPitByGvar(displayPort_t *, const void *self);
+static const void *saCmsConfigOpmodelByGvar(displayPort_t *, const void *self);
+static const void *saCmsConfigPitFModeByGvar(displayPort_t *, const void *self);
+static const void *saCmsConfigBandByGvar(displayPort_t *, const void *self);
+static const void *saCmsConfigChanByGvar(displayPort_t *, const void *self);
+static const void *saCmsConfigPowerByGvar(displayPort_t *, const void *self);
+static const void *saCmsConfigPitByGvar(displayPort_t *, const void *self);
 
 void saUpdateStatusString(void)
 {
@@ -198,13 +198,13 @@ void saUpdateStatusString(void)
     }
 }
 
-void saCmsResetOpmodel()
+void saCmsResetOpmodel(void)
 {
     // trigger data refresh in 'saCmsUpdate()'
     saCmsOpmodel = SACMS_OPMODEL_UNDEF;
 }
 
-static long saCmsConfigBandByGvar(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigBandByGvar(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -212,13 +212,13 @@ static long saCmsConfigBandByGvar(displayPort_t *pDisp, const void *self)
     if (saDevice.version == 0) {
         // Bounce back; not online yet
         saCmsBand = 0;
-        return 0;
+        return NULL;
     }
 
     if (saCmsBand == 0) {
         // Bouce back, no going back to undef state
         saCmsBand = 1;
-        return 0;
+        return NULL;
     }
 
     if ((saCmsOpmodel == SACMS_OPMODEL_FREE) && !saDeferred) {
@@ -227,10 +227,10 @@ static long saCmsConfigBandByGvar(displayPort_t *pDisp, const void *self)
 
     saCmsFreqRef = vtxCommonLookupFrequency(vtxCommonDevice(), saCmsBand, saCmsChan);
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsConfigChanByGvar(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigChanByGvar(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -238,13 +238,13 @@ static long saCmsConfigChanByGvar(displayPort_t *pDisp, const void *self)
     if (saDevice.version == 0) {
         // Bounce back; not online yet
         saCmsChan = 0;
-        return 0;
+        return NULL;
     }
 
     if (saCmsChan == 0) {
         // Bounce back; no going back to undef state
         saCmsChan = 1;
-        return 0;
+        return NULL;
     }
 
     if ((saCmsOpmodel == SACMS_OPMODEL_FREE) && !saDeferred) {
@@ -253,10 +253,10 @@ static long saCmsConfigChanByGvar(displayPort_t *pDisp, const void *self)
 
     saCmsFreqRef = vtxCommonLookupFrequency(vtxCommonDevice(), saCmsBand, saCmsChan);
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsConfigPitByGvar(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigPitByGvar(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -266,21 +266,21 @@ static long saCmsConfigPitByGvar(displayPort_t *pDisp, const void *self)
     if (saDevice.version == 0) {
         // Bounce back; not online yet
         saCmsPit = 0;
-        return 0;
+        return NULL;
     }
 
     if (saCmsPit == 0) {//trying to go back to undef state; bounce back
         saCmsPit = 1;
-        return 0;
+        return NULL;
     }
     if (saDevice.power != saCmsPower) {//we can't change both power and pit mode at once
         saCmsPower = saDevice.power;
     }
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsConfigPowerByGvar(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigPowerByGvar(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -288,13 +288,13 @@ static long saCmsConfigPowerByGvar(displayPort_t *pDisp, const void *self)
     if (saDevice.version == 0) {
         // Bounce back; not online yet
         saCmsPower = 0;
-        return 0;
+        return NULL;
     }
 
     if (saCmsPower == 0) {
         // Bouce back; no going back to undef state
         saCmsPower = 1;
-        return 0;
+        return NULL;
     }
 
     if (saCmsPit > 0 && saCmsPit != 1 ) {
@@ -306,10 +306,10 @@ static long saCmsConfigPowerByGvar(displayPort_t *pDisp, const void *self)
     }
     dprintf(("saCmsConfigPowerByGvar: power index is now %d\r\n", saCmsPower));
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsConfigPitFModeByGvar(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigPitFModeByGvar(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -317,13 +317,13 @@ static long saCmsConfigPitFModeByGvar(displayPort_t *pDisp, const void *self)
     if (saDevice.version == 1) {
         // V1 device doesn't support PIT mode; bounce back.
         saCmsPitFMode = 0;
-        return 0;
+        return NULL;
     }
     if (saDevice.version >= 3) {
         // V2.1 device only supports PIR mode. and setting any flag immediately enables pit mode.
         //therefore: bounce back.
         saCmsPitFMode = 1;
-        return 0;
+        return NULL;
     }
 
     dprintf(("saCmsConfigPitFmodeByGbar: saCmsPitFMode %d\r\n", saCmsPitFMode));
@@ -331,7 +331,7 @@ static long saCmsConfigPitFModeByGvar(displayPort_t *pDisp, const void *self)
     if (saCmsPitFMode == 0) {
         // Bounce back
         saCmsPitFMode = 1;
-        return 0;
+        return NULL;
     }
 
     if (saCmsPitFMode == 1) {
@@ -340,12 +340,12 @@ static long saCmsConfigPitFModeByGvar(displayPort_t *pDisp, const void *self)
         saSetMode(SA_MODE_SET_OUT_RANGE_PITMODE);
     }
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsConfigFreqModeByGvar(displayPort_t *pDisp, const void *self); // Forward
+static const void *saCmsConfigFreqModeByGvar(displayPort_t *pDisp, const void *self); // Forward
 
-static long saCmsConfigOpmodelByGvar(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigOpmodelByGvar(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -353,7 +353,7 @@ static long saCmsConfigOpmodelByGvar(displayPort_t *pDisp, const void *self)
     if (saDevice.version == 1) {
         if (saCmsOpmodel != SACMS_OPMODEL_FREE)
             saCmsOpmodel = SACMS_OPMODEL_FREE;
-        return 0;
+        return NULL;
     }
 
     uint8_t opmodel = saCmsOpmodel;
@@ -382,7 +382,7 @@ static long saCmsConfigOpmodelByGvar(displayPort_t *pDisp, const void *self)
         saCmsOpmodel = SACMS_OPMODEL_UNDEF + 1;
     }
 
-    return 0;
+    return NULL;
 }
 
 #ifdef USE_EXTENDED_CMS_MENUS
@@ -396,17 +396,17 @@ static const char * const saCmsDeviceStatusNames[] = {
 static OSD_TAB_t saCmsEntOnline = { &saCmsDeviceStatus, 3, saCmsDeviceStatusNames };
 
 static const OSD_Entry saCmsMenuStatsEntries[] = {
-    { "- SA STATS -", OME_Label, NULL, NULL, 0 },
-    { "STATUS",   OME_TAB,    NULL, &saCmsEntOnline,                              DYNAMIC },
-    { "BAUDRATE", OME_UINT16, NULL, &(OSD_UINT16_t){ &sa_smartbaud, 0, 0, 0 },    DYNAMIC },
-    { "SENT",     OME_UINT16, NULL, &(OSD_UINT16_t){ &saStat.pktsent, 0, 0, 0 },  DYNAMIC },
-    { "RCVD",     OME_UINT16, NULL, &(OSD_UINT16_t){ &saStat.pktrcvd, 0, 0, 0 },  DYNAMIC },
-    { "BADPRE",   OME_UINT16, NULL, &(OSD_UINT16_t){ &saStat.badpre, 0, 0, 0 },   DYNAMIC },
-    { "BADLEN",   OME_UINT16, NULL, &(OSD_UINT16_t){ &saStat.badlen, 0, 0, 0 },   DYNAMIC },
-    { "CRCERR",   OME_UINT16, NULL, &(OSD_UINT16_t){ &saStat.crc, 0, 0, 0 },      DYNAMIC },
-    { "OOOERR",   OME_UINT16, NULL, &(OSD_UINT16_t){ &saStat.ooopresp, 0, 0, 0 }, DYNAMIC },
-    { "BACK",     OME_Back,   NULL, NULL, 0 },
-    { NULL,       OME_END,    NULL, NULL, 0 }
+    { "- SA STATS -", OME_Label, NULL, NULL },
+    { "STATUS",   OME_TAB | DYNAMIC,    NULL, &saCmsEntOnline },
+    { "BAUDRATE", OME_UINT16 | DYNAMIC, NULL, &(OSD_UINT16_t){ &sa_smartbaud, 0, 0, 0 } },
+    { "SENT",     OME_UINT16 | DYNAMIC, NULL, &(OSD_UINT16_t){ &saStat.pktsent, 0, 0, 0 } },
+    { "RCVD",     OME_UINT16 | DYNAMIC, NULL, &(OSD_UINT16_t){ &saStat.pktrcvd, 0, 0, 0 } },
+    { "BADPRE",   OME_UINT16 | DYNAMIC, NULL, &(OSD_UINT16_t){ &saStat.badpre, 0, 0, 0 } },
+    { "BADLEN",   OME_UINT16 | DYNAMIC, NULL, &(OSD_UINT16_t){ &saStat.badlen, 0, 0, 0 } },
+    { "CRCERR",   OME_UINT16 | DYNAMIC, NULL, &(OSD_UINT16_t){ &saStat.crc, 0, 0, 0 } },
+    { "OOOERR",   OME_UINT16 | DYNAMIC, NULL, &(OSD_UINT16_t){ &saStat.ooopresp, 0, 0, 0 } },
+    { "BACK",     OME_Back,   NULL, NULL },
+    { NULL,       OME_END,    NULL, NULL }
 };
 
 static CMS_Menu saCmsMenuStats = {
@@ -416,6 +416,7 @@ static CMS_Menu saCmsMenuStats = {
 #endif
     .onEnter = NULL,
     .onExit = NULL,
+    .onDisplayUpdate = NULL,
     .entries = saCmsMenuStatsEntries
 };
 #endif /* USE_EXTENDED_CMS_MENUS */
@@ -467,9 +468,9 @@ static const char * const saCmsPitNames[] = {
 static OSD_TAB_t saCmsEntPitFMode = { &saCmsPitFMode, 1, saCmsPitFModeNames };
 static OSD_TAB_t saCmsEntPit = {&saCmsPit, 2, saCmsPitNames};
 
-static long sacms_SetupTopMenu(void); // Forward
+static const void *sacms_SetupTopMenu(displayPort_t *pDisp); // Forward
 
-static long saCmsConfigFreqModeByGvar(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigFreqModeByGvar(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -483,16 +484,13 @@ static long saCmsConfigFreqModeByGvar(displayPort_t *pDisp, const void *self)
     // don't call 'saSetBandAndChannel()' / 'saSetFreq()' here,
     // wait until SET / 'saCmsCommence()' is activated
 
-    sacms_SetupTopMenu();
+    sacms_SetupTopMenu(pDisp);
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsCommence(displayPort_t *pDisp, const void *self)
+static const void *saCmsCommence(displayPort_t *pDisp, const void *self)
 {
-    UNUSED(pDisp);
-    UNUSED(self);
-
     const vtxSettingsConfig_t prevSettings = {
         .band = vtxSettingsConfig()->band,
         .channel = vtxSettingsConfig()->channel,
@@ -536,31 +534,38 @@ static long saCmsCommence(displayPort_t *pDisp, const void *self)
         saveConfigAndNotify();
     }
 
+    cmsMenuExit(pDisp, self);
+
     return MENU_CHAIN_BACK;
 }
 
-static long saCmsSetPORFreqOnEnter(void)
+static const void *saCmsSetPORFreqOnEnter(displayPort_t *pDisp)
 {
+    UNUSED(pDisp);
+
     if (saDevice.version == 1)
         return MENU_CHAIN_BACK;
 
     saCmsORFreqNew = saCmsORFreq;
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsSetPORFreq(displayPort_t *pDisp, const void *self)
+static const void *saCmsSetPORFreq(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
 
     saSetPitFreq(saCmsORFreqNew);
 
-    return 0;
+    return NULL;
 }
 
-static char *saCmsORFreqGetString(void)
+static const char *saCmsORFreqGetString(displayPort_t *pDisp, const void *self)
 {
+    UNUSED(pDisp);
+    UNUSED(self);
+
     static char pbuf[5];
 
     tfp_sprintf(pbuf, "%4d", saCmsORFreq);
@@ -568,8 +573,11 @@ static char *saCmsORFreqGetString(void)
     return pbuf;
 }
 
-static char *saCmsUserFreqGetString(void)
+static const char *saCmsUserFreqGetString(displayPort_t *pDisp, const void *self)
 {
+    UNUSED(pDisp);
+    UNUSED(self);
+
     static char pbuf[5];
 
     tfp_sprintf(pbuf, "%4d", saCmsUserFreq);
@@ -577,14 +585,16 @@ static char *saCmsUserFreqGetString(void)
     return pbuf;
 }
 
-static long saCmsSetUserFreqOnEnter(void)
+static const void *saCmsSetUserFreqOnEnter(displayPort_t *pDisp)
 {
+    UNUSED(pDisp);
+
     saCmsUserFreqNew = saCmsUserFreq;
 
-    return 0;
+    return NULL;
 }
 
-static long saCmsConfigUserFreq(displayPort_t *pDisp, const void *self)
+static const void *saCmsConfigUserFreq(displayPort_t *pDisp, const void *self)
 {
     UNUSED(pDisp);
     UNUSED(self);
@@ -595,14 +605,14 @@ static long saCmsConfigUserFreq(displayPort_t *pDisp, const void *self)
 }
 
 static const OSD_Entry saCmsMenuPORFreqEntries[] = {
-    { "- POR FREQ -", OME_Label,   NULL,             NULL,                                                 0 },
+    { "- POR FREQ -", OME_Label,   NULL,             NULL },
 
-    { "CUR FREQ",     OME_UINT16,  NULL,             &(OSD_UINT16_t){ &saCmsORFreq, 5000, 5999, 0 },       DYNAMIC },
-    { "NEW FREQ",     OME_UINT16,  NULL,             &(OSD_UINT16_t){ &saCmsORFreqNew, 5000, 5999, 1 },    0 },
-    { "SET",          OME_Funcall, saCmsSetPORFreq,  NULL,                                                 0 },
+    { "CUR FREQ",     OME_UINT16 | DYNAMIC,  NULL,             &(OSD_UINT16_t){ &saCmsORFreq, 5000, 5999, 0 } },
+    { "NEW FREQ",     OME_UINT16,  NULL,             &(OSD_UINT16_t){ &saCmsORFreqNew, 5000, 5999, 1 } },
+    { "SAVE",         OME_Funcall, saCmsSetPORFreq,  NULL },
 
-    { "BACK",         OME_Back,    NULL,             NULL,                                                 0 },
-    { NULL,           OME_END,     NULL,             NULL,                                                 0 }
+    { "BACK",         OME_Back,    NULL,             NULL },
+    { NULL,           OME_END,     NULL,             NULL }
 };
 
 static CMS_Menu saCmsMenuPORFreq =
@@ -613,18 +623,19 @@ static CMS_Menu saCmsMenuPORFreq =
 #endif
     .onEnter = saCmsSetPORFreqOnEnter,
     .onExit = NULL,
+    .onDisplayUpdate = NULL,
     .entries = saCmsMenuPORFreqEntries,
 };
 
 static const OSD_Entry saCmsMenuUserFreqEntries[] = {
-    { "- USER FREQ -", OME_Label,   NULL,             NULL,                                                0 },
+    { "- USER FREQ -", OME_Label,   NULL,             NULL },
 
-    { "CUR FREQ",      OME_UINT16,  NULL,             &(OSD_UINT16_t){ &saCmsUserFreq, 5000, 5999, 0 },    DYNAMIC },
-    { "NEW FREQ",      OME_UINT16,  NULL,             &(OSD_UINT16_t){ &saCmsUserFreqNew, 5000, 5999, 1 }, 0 },
-    { "SET",           OME_Funcall, saCmsConfigUserFreq, NULL,                                                0 },
+    { "CUR FREQ",      OME_UINT16 | DYNAMIC,  NULL,             &(OSD_UINT16_t){ &saCmsUserFreq, 5000, 5999, 0 } },
+    { "NEW FREQ",      OME_UINT16,  NULL,             &(OSD_UINT16_t){ &saCmsUserFreqNew, 5000, 5999, 1 } },
+    { "SAVE",          OME_Funcall, saCmsConfigUserFreq, NULL },
 
-    { "BACK",          OME_Back,    NULL,             NULL,                                                0 },
-    { NULL,            OME_END,     NULL,             NULL,                                                0 }
+    { "BACK",          OME_Back,    NULL,             NULL },
+    { NULL,            OME_END,     NULL,             NULL }
 };
 
 static CMS_Menu saCmsMenuUserFreq =
@@ -635,24 +646,25 @@ static CMS_Menu saCmsMenuUserFreq =
 #endif
     .onEnter = saCmsSetUserFreqOnEnter,
     .onExit = NULL,
+    .onDisplayUpdate = NULL,
     .entries = saCmsMenuUserFreqEntries,
 };
 
 static OSD_TAB_t saCmsEntFselMode = { &saCmsFselModeNew, 1, saCmsFselModeNames };
 
 static const OSD_Entry saCmsMenuConfigEntries[] = {
-    { "- SA CONFIG -", OME_Label, NULL, NULL, 0 },
+    { "- SA CONFIG -", OME_Label, NULL, NULL },
 
-    { "OP MODEL",  OME_TAB,     saCmsConfigOpmodelByGvar,              &(OSD_TAB_t){ &saCmsOpmodel, 2, saCmsOpmodelNames }, DYNAMIC },
-    { "FSEL MODE", OME_TAB,     saCmsConfigFreqModeByGvar,             &saCmsEntFselMode,                                   DYNAMIC },
-    { "PIT FMODE", OME_TAB,     saCmsConfigPitFModeByGvar,             &saCmsEntPitFMode,                                   0 },
-    { "POR FREQ",  OME_Submenu, (CMSEntryFuncPtr)saCmsORFreqGetString, &saCmsMenuPORFreq,                                   OPTSTRING },
+    { "OP MODEL",  OME_TAB | DYNAMIC,     saCmsConfigOpmodelByGvar,              &(OSD_TAB_t){ &saCmsOpmodel, 2, saCmsOpmodelNames } },
+    { "FSEL MODE", OME_TAB | DYNAMIC,     saCmsConfigFreqModeByGvar,             &saCmsEntFselMode },
+    { "PIT FMODE", OME_TAB,     saCmsConfigPitFModeByGvar,             &saCmsEntPitFMode },
+    { "POR FREQ",  OME_Submenu | OPTSTRING, (CMSEntryFuncPtr)saCmsORFreqGetString, &saCmsMenuPORFreq },
 #ifdef USE_EXTENDED_CMS_MENUS
-    { "STATX",     OME_Submenu, cmsMenuChange,                         &saCmsMenuStats,                                     0 },
+    { "STATX",     OME_Submenu, cmsMenuChange,                         &saCmsMenuStats },
 #endif /* USE_EXTENDED_CMS_MENUS */
 
-    { "BACK", OME_Back, NULL, NULL, 0 },
-    { NULL, OME_END, NULL, NULL, 0 }
+    { "BACK", OME_Back, NULL, NULL },
+    { NULL, OME_END, NULL, NULL}
 };
 
 static CMS_Menu saCmsMenuConfig = {
@@ -662,16 +674,17 @@ static CMS_Menu saCmsMenuConfig = {
 #endif
     .onEnter = NULL,
     .onExit = NULL,
+    .onDisplayUpdate = NULL,
     .entries = saCmsMenuConfigEntries
 };
 
 static const OSD_Entry saCmsMenuCommenceEntries[] = {
-    { "CONFIRM", OME_Label,   NULL,          NULL, 0 },
+    { "CONFIRM", OME_Label,   NULL,          NULL },
 
-    { "YES",     OME_Funcall, saCmsCommence, NULL, 0 },
+    { "YES",   OME_OSD_Exit, saCmsCommence, (void *)CMS_EXIT },
 
-    { "BACK",    OME_Back, NULL, NULL, 0 },
-    { NULL,      OME_END, NULL, NULL, 0 }
+    { "NO",    OME_Back, NULL, NULL },
+    { NULL,      OME_END, NULL, NULL }
 };
 
 static CMS_Menu saCmsMenuCommence = {
@@ -681,57 +694,60 @@ static CMS_Menu saCmsMenuCommence = {
 #endif
     .onEnter = NULL,
     .onExit = NULL,
+    .onDisplayUpdate = NULL,
     .entries = saCmsMenuCommenceEntries,
 };
 
 static const OSD_Entry saCmsMenuFreqModeEntries[] = {
-    { "- SMARTAUDIO -", OME_Label, NULL, NULL, 0 },
+    { "- SMARTAUDIO -", OME_Label, NULL, NULL },
 
-    { "",       OME_Label,   NULL,                                     saCmsStatusString,  DYNAMIC },
-    { "FREQ",   OME_Submenu, (CMSEntryFuncPtr)saCmsUserFreqGetString,  &saCmsMenuUserFreq, OPTSTRING },
-    { "POWER",  OME_TAB,     saCmsConfigPowerByGvar,                   &saCmsEntPower,     DYNAMIC },
-    { "PIT",    OME_TAB,     saCmsConfigPitByGvar,                     &saCmsEntPit,     DYNAMIC },
-    { "SET",    OME_Submenu, cmsMenuChange,                            &saCmsMenuCommence, 0 },
-    { "CONFIG", OME_Submenu, cmsMenuChange,                            &saCmsMenuConfig,   0 },
+    { "",       OME_Label | DYNAMIC,   NULL,                                     saCmsStatusString },
+    { "FREQ",   OME_Submenu | OPTSTRING, (CMSEntryFuncPtr)saCmsUserFreqGetString,  &saCmsMenuUserFreq },
+    { "POWER",  OME_TAB | DYNAMIC,     saCmsConfigPowerByGvar,                   &saCmsEntPower },
+    { "PIT",    OME_TAB | DYNAMIC,     saCmsConfigPitByGvar,                     &saCmsEntPit },
+    { "SAVE&EXIT", OME_Submenu, cmsMenuChange,                            &saCmsMenuCommence },
+    { "CONFIG", OME_Submenu, cmsMenuChange,                            &saCmsMenuConfig },
 
-    { "BACK", OME_Back, NULL, NULL, 0 },
-    { NULL, OME_END, NULL, NULL, 0 }
+    { "BACK", OME_Back, NULL, NULL },
+    { NULL, OME_END, NULL, NULL}
 };
 
 static const OSD_Entry saCmsMenuChanModeEntries[] =
 {
-    { "- SMARTAUDIO -", OME_Label, NULL, NULL, 0 },
+    { "- SMARTAUDIO -", OME_Label, NULL, NULL },
 
-    { "",       OME_Label,   NULL,                   saCmsStatusString,  DYNAMIC },
-    { "BAND",   OME_TAB,     saCmsConfigBandByGvar,  &saCmsEntBand,      0 },
-    { "CHAN",   OME_TAB,     saCmsConfigChanByGvar,  &saCmsEntChan,      0 },
-    { "(FREQ)", OME_UINT16,  NULL,                   &saCmsEntFreqRef,   DYNAMIC },
-    { "POWER",  OME_TAB,     saCmsConfigPowerByGvar, &saCmsEntPower,     DYNAMIC },
-    { "PIT",    OME_TAB,     saCmsConfigPitByGvar,   &saCmsEntPit,     DYNAMIC },
-    { "SET",    OME_Submenu, cmsMenuChange,          &saCmsMenuCommence, 0 },
-    { "CONFIG", OME_Submenu, cmsMenuChange,          &saCmsMenuConfig,   0 },
+    { "",       OME_Label | DYNAMIC,   NULL,                   saCmsStatusString },
+    { "BAND",   OME_TAB,     saCmsConfigBandByGvar,  &saCmsEntBand },
+    { "CHAN",   OME_TAB,     saCmsConfigChanByGvar,  &saCmsEntChan },
+    { "(FREQ)", OME_UINT16 | DYNAMIC,  NULL,                   &saCmsEntFreqRef },
+    { "POWER",  OME_TAB | DYNAMIC,     saCmsConfigPowerByGvar, &saCmsEntPower },
+    { "PIT",    OME_TAB | DYNAMIC,     saCmsConfigPitByGvar,   &saCmsEntPit },
+    { "SAVE&EXIT", OME_Submenu, cmsMenuChange,          &saCmsMenuCommence },
+    { "CONFIG", OME_Submenu, cmsMenuChange,          &saCmsMenuConfig },
 
-    { "BACK",   OME_Back, NULL, NULL, 0 },
-    { NULL,     OME_END, NULL, NULL, 0 }
+    { "BACK",   OME_Back, NULL, NULL },
+    { NULL,     OME_END, NULL, NULL }
 };
 
 static const OSD_Entry saCmsMenuOfflineEntries[] =
 {
-    { "- VTX SMARTAUDIO -", OME_Label, NULL, NULL, 0 },
+    { "- VTX SMARTAUDIO -", OME_Label, NULL, NULL },
 
-    { "",      OME_Label,   NULL,          saCmsStatusString, DYNAMIC },
+    { "",      OME_Label | DYNAMIC,   NULL,          saCmsStatusString },
 #ifdef USE_EXTENDED_CMS_MENUS
-    { "STATX", OME_Submenu, cmsMenuChange, &saCmsMenuStats,   0 },
+    { "STATX", OME_Submenu, cmsMenuChange, &saCmsMenuStats },
 #endif /* USE_EXTENDED_CMS_MENUS */
 
-    { "BACK",  OME_Back, NULL, NULL, 0 },
-    { NULL,    OME_END, NULL, NULL, 0 }
+    { "BACK",  OME_Back, NULL, NULL },
+    { NULL,    OME_END, NULL, NULL }
 };
 
 CMS_Menu cmsx_menuVtxSmartAudio; // Forward
 
-static long sacms_SetupTopMenu(void)
+static const void *sacms_SetupTopMenu(displayPort_t *pDisp)
 {
+    UNUSED(pDisp);
+
     if (saCmsDeviceStatus) {
         if (saCmsFselModeNew == 0)
             cmsx_menuVtxSmartAudio.entries = saCmsMenuChanModeEntries;
@@ -743,7 +759,7 @@ static long sacms_SetupTopMenu(void)
 
     saCmsInitNames();
 
-    return 0;
+    return NULL;
 }
 
 CMS_Menu cmsx_menuVtxSmartAudio = {
@@ -753,6 +769,7 @@ CMS_Menu cmsx_menuVtxSmartAudio = {
 #endif
     .onEnter = sacms_SetupTopMenu,
     .onExit = NULL,
+    .onDisplayUpdate = NULL,
     .entries = saCmsMenuOfflineEntries,
 };
 

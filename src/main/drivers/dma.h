@@ -22,6 +22,17 @@
 
 #include "drivers/resource.h"
 
+#if defined(USE_ATBSP_DRIVER)
+#include "drivers/mcu/at32/dma_atbsp.h"
+#endif
+
+#if defined(APM32F4)
+#include "drivers/mcu/apm32/dma_apm32.h"
+#endif
+
+#define CACHE_LINE_SIZE 32
+#define CACHE_LINE_MASK (CACHE_LINE_SIZE - 1)
+
 // dmaResource_t is a opaque data type which represents a single DMA engine,
 // called and implemented differently in different families of STM32s.
 // The opaque data type provides uniform handling of the engine in source code.
@@ -34,7 +45,12 @@ typedef struct dmaResource_s dmaResource_t;
 #if defined(STM32F4) || defined(STM32F7)
 #define DMA_ARCH_TYPE DMA_Stream_TypeDef
 #elif defined(STM32H7)
-#define DMA_ARCH_TYPE void
+// H7 has stream based DMA and channel based BDMA, but we ignore BDMA (for now).
+#define DMA_ARCH_TYPE DMA_Stream_TypeDef
+#elif defined(AT32F435)
+#define DMA_ARCH_TYPE dma_channel_type
+#elif defined(APM32F4)
+#define DMA_ARCH_TYPE DMA_Stream_TypeDef
 #else
 #define DMA_ARCH_TYPE DMA_Channel_TypeDef
 #endif
@@ -45,9 +61,10 @@ typedef void (*dmaCallbackHandlerFuncPtr)(struct dmaChannelDescriptor_s *channel
 typedef struct dmaChannelDescriptor_s {
     DMA_TypeDef*                dma;
     dmaResource_t               *ref;
-#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7)
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32G4) || defined(STM32H7) || defined(APM32F4)
     uint8_t                     stream;
 #endif
+    uint32_t                    channel;
     dmaCallbackHandlerFuncPtr   irqHandlerCallback;
     uint8_t                     flagsShift;
     IRQn_Type                   irqN;
@@ -55,17 +72,19 @@ typedef struct dmaChannelDescriptor_s {
     resourceOwner_t             owner;
     uint8_t                     resourceIndex;
     uint32_t                    completeFlag;
-} dmaChannelDescriptor_t;
-
-#if defined(STM32F7)
-//#define HAL_CLEANINVALIDATECACHE(addr, size) (SCB_CleanInvalidateDCache_by_Addr((uint32_t*)((uint32_t)addr & ~0x1f), ((uint32_t)(addr + size + 0x1f) & ~0x1f) - ((uint32_t)addr & ~0x1f)))
-//#define HAL_CLEANCACHE(addr, size) (SCB_CleanDCache_by_Addr((uint32_t*)((uint32_t)addr & ~0x1f), ((uint32_t)(addr + size + 0x1f) & ~0x1f) - ((uint32_t)addr & ~0x1f)))
-
+#if defined(USE_ATBSP_DRIVER)
+    dmamux_channel_type         *dmamux;
 #endif
+} dmaChannelDescriptor_t;
 
 #define DMA_IDENTIFIER_TO_INDEX(x) ((x) - 1)
 
-#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7)
+#if defined(USE_ATBSP_DRIVER)
+
+#elif defined(APM32F4)
+// dma_apm32.h
+
+#elif defined(STM32F4) || defined(STM32F7) || defined(STM32H7)
 
 typedef enum {
     DMA_NONE = 0,
@@ -104,9 +123,9 @@ typedef enum {
     .userParam = 0, \
     .owner.owner = 0, \
     .owner.resourceIndex = 0 \
-    } 
+    }
 
-#define DEFINE_DMA_IRQ_HANDLER(d, s, i) void DMA ## d ## _Stream ## s ## _IRQHandler(void) {\
+#define DEFINE_DMA_IRQ_HANDLER(d, s, i) FAST_IRQ_HANDLER void DMA ## d ## _Stream ## s ## _IRQHandler(void) {\
                                                                 const uint8_t index = DMA_IDENTIFIER_TO_INDEX(i); \
                                                                 dmaCallbackHandlerFuncPtr handler = dmaDescriptors[index].irqHandlerCallback; \
                                                                 if (handler) \
@@ -123,12 +142,11 @@ typedef enum {
 #define DMA_IT_DMEIF        ((uint32_t)0x00000004)
 #define DMA_IT_FEIF         ((uint32_t)0x00000001)
 
-dmaIdentifier_e dmaGetIdentifier(const dmaResource_t *stream);
-dmaChannelDescriptor_t* dmaGetDmaDescriptor(const dmaResource_t *stream);
-dmaResource_t *dmaGetRefByIdentifier(const dmaIdentifier_e identifier);
-uint32_t dmaGetChannel(const uint8_t channel);
+void dmaMuxEnable(dmaIdentifier_e identifier, uint32_t dmaMuxId);
 
 #else
+
+#if defined(STM32G4)
 
 typedef enum {
     DMA_NONE = 0,
@@ -139,20 +157,42 @@ typedef enum {
     DMA1_CH5_HANDLER,
     DMA1_CH6_HANDLER,
     DMA1_CH7_HANDLER,
-#if defined(STM32F3) || defined(STM32F10X_CL)
+    DMA1_CH8_HANDLER,
     DMA2_CH1_HANDLER,
     DMA2_CH2_HANDLER,
     DMA2_CH3_HANDLER,
     DMA2_CH4_HANDLER,
     DMA2_CH5_HANDLER,
-    DMA_LAST_HANDLER = DMA2_CH5_HANDLER 
-#else 
+    DMA2_CH6_HANDLER,
+    DMA2_CH7_HANDLER,
+    DMA2_CH8_HANDLER,
+    DMA_LAST_HANDLER = DMA2_CH8_HANDLER
+} dmaIdentifier_e;
+
+#define DMA_DEVICE_NO(x)    ((((x)-1) / 8) + 1)
+#define DMA_DEVICE_INDEX(x) ((((x)-1) % 8) + 1)
+
+uint32_t dmaGetChannel(const uint8_t channel);
+
+#else // !STM32G4
+
+typedef enum {
+    DMA_NONE = 0,
+    DMA1_CH1_HANDLER = 1,
+    DMA1_CH2_HANDLER,
+    DMA1_CH3_HANDLER,
+    DMA1_CH4_HANDLER,
+    DMA1_CH5_HANDLER,
+    DMA1_CH6_HANDLER,
+    DMA1_CH7_HANDLER,
     DMA_LAST_HANDLER = DMA1_CH7_HANDLER
-#endif
 } dmaIdentifier_e;
 
 #define DMA_DEVICE_NO(x)    ((((x)-1) / 7) + 1)
 #define DMA_DEVICE_INDEX(x) ((((x)-1) % 7) + 1)
+
+#endif // STM32G4
+
 #define DMA_OUTPUT_INDEX    0
 #define DMA_OUTPUT_STRING   "DMA%d Channel %d:"
 #define DMA_INPUT_STRING    "DMA%d_CH%d"
@@ -168,7 +208,9 @@ typedef enum {
     .owner.resourceIndex = 0 \
     }
 
-#define DEFINE_DMA_IRQ_HANDLER(d, c, i) void DMA ## d ## _Channel ## c ## _IRQHandler(void) {\
+#define DMA_HANDLER_CODE
+
+#define DEFINE_DMA_IRQ_HANDLER(d, c, i) DMA_HANDLER_CODE void DMA ## d ## _Channel ## c ## _IRQHandler(void) {\
                                                                         const uint8_t index = DMA_IDENTIFIER_TO_INDEX(i); \
                                                                         dmaCallbackHandlerFuncPtr handler = dmaDescriptors[index].irqHandlerCallback; \
                                                                         if (handler) \
@@ -181,10 +223,6 @@ typedef enum {
 #define DMA_IT_TCIF         ((uint32_t)0x00000002)
 #define DMA_IT_HTIF         ((uint32_t)0x00000004)
 #define DMA_IT_TEIF         ((uint32_t)0x00000008)
-
-dmaIdentifier_e dmaGetIdentifier(const dmaResource_t* channel);
-dmaResource_t* dmaGetRefByIdentifier(const dmaIdentifier_e identifier);
-
 #endif
 
 // Macros to avoid direct register and register bit access
@@ -197,31 +235,50 @@ dmaResource_t* dmaGetRefByIdentifier(const dmaIdentifier_e identifier);
 // HAL library has a macro for this, but it is extremely inefficient in that it compares
 // the address against all possible values.
 // Here, we just compare the address against regions of memory.
-// If it's not in D3 peripheral area, then it's DMA1/2 and it's stream based.
+#if defined(STM32H7A3xx) || defined(STM32H7A3xxQ)
+// For H7A3, if it's lower than CD_AHB2PERIPH_BASE, then it's DMA1/2 and it's stream based.
+// If not, it's BDMA and it's channel based.
+#define IS_DMA_ENABLED(reg) \
+    ((uint32_t)(reg) < CD_AHB2PERIPH_BASE) ? \
+        (((DMA_Stream_TypeDef *)(reg))->CR & DMA_SxCR_EN) : \
+        (((BDMA_Channel_TypeDef *)(reg))->CCR & BDMA_CCR_EN)
+#else
+// For H743 and H750, if it's not in D3 peripheral area, then it's DMA1/2 and it's stream based.
 // If not, it's BDMA and it's channel based.
 #define IS_DMA_ENABLED(reg) \
     ((uint32_t)(reg) < D3_AHB1PERIPH_BASE) ? \
         (((DMA_Stream_TypeDef *)(reg))->CR & DMA_SxCR_EN) : \
         (((BDMA_Channel_TypeDef *)(reg))->CCR & BDMA_CCR_EN)
-#else
-#if defined(STM32F1)
-#define DMA_CCR_EN 1 // Not defined anywhere ...
 #endif
+#elif defined(STM32G4)
+#define IS_DMA_ENABLED(reg) (((DMA_ARCH_TYPE *)(reg))->CCR & DMA_CCR_EN)
+// Missing __HAL_DMA_SET_COUNTER in FW library V1.0.0
+#define __HAL_DMA_SET_COUNTER(__HANDLE__, __COUNTER__) ((__HANDLE__)->Instance->CNDTR = (uint16_t)(__COUNTER__))
+#elif defined(AT32F4)
+#define DMA_CCR_EN 1 
+#define IS_DMA_ENABLED(reg) (((DMA_ARCH_TYPE *)(reg))->ctrl_bit.chen & DMA_CCR_EN)
+#elif defined(APM32F4)
+#define IS_DMA_ENABLED(reg) (((DMA_ARCH_TYPE *)(reg))->SCFG & DMA_SCFGx_EN)
+#define REG_NDTR NDATA
+#else
 #define IS_DMA_ENABLED(reg) (((DMA_ARCH_TYPE *)(reg))->CCR & DMA_CCR_EN)
 #define DMAx_SetMemoryAddress(reg, address) ((DMA_ARCH_TYPE *)(reg))->CMAR = (uint32_t)&s->port.txBuffer[s->port.txBufferTail]
 #endif
 
-void dmaInit(dmaIdentifier_e identifier, resourceOwner_e owner, uint8_t resourceIndex);
+dmaIdentifier_e dmaAllocate(dmaIdentifier_e identifier, resourceOwner_e owner, uint8_t resourceIndex);
+void dmaEnable(dmaIdentifier_e identifier);
 void dmaSetHandler(dmaIdentifier_e identifier, dmaCallbackHandlerFuncPtr callback, uint32_t priority, uint32_t userParam);
 
+dmaIdentifier_e dmaGetIdentifier(const dmaResource_t* channel);
 const resourceOwner_t *dmaGetOwner(dmaIdentifier_e identifier);
 dmaChannelDescriptor_t* dmaGetDescriptorByIdentifier(const dmaIdentifier_e identifier);
+uint32_t dmaGetChannel(const uint8_t channel);
 
 //
 // Wrapper macros to cast dmaResource_t back into DMA_ARCH_TYPE
 //
 
-#ifdef USE_HAL_DRIVER
+#if defined(USE_HAL_DRIVER)
 
 // We actually need these LL case only
 
@@ -232,6 +289,8 @@ dmaChannelDescriptor_t* dmaGetDescriptorByIdentifier(const dmaIdentifier_e ident
 #define xLL_EX_DMA_GetDataLength(dmaResource) LL_EX_DMA_GetDataLength((DMA_ARCH_TYPE *)(dmaResource))
 #define xLL_EX_DMA_SetDataLength(dmaResource, length) LL_EX_DMA_SetDataLength((DMA_ARCH_TYPE *)(dmaResource), length)
 #define xLL_EX_DMA_EnableIT_TC(dmaResource) LL_EX_DMA_EnableIT_TC((DMA_ARCH_TYPE *)(dmaResource))
+
+#elif defined(USE_ATBSP_DRIVER)
 
 #else
 

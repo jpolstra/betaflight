@@ -46,7 +46,7 @@ typedef struct bmp388_calib_param_s {
     int8_t P11;
 } __attribute__((packed)) bmp388_calib_param_t; // packed as we read directly from the device into this structure.
 
-bmp388_calib_param_t bmp388_cal;
+extern bmp388_calib_param_t bmp388_cal;
 
 } // extern "C"
 
@@ -142,43 +142,58 @@ TEST(baroBmp388Test, TestBmp388CalculateWithSampleCalibration)
 
 extern "C" {
 
-void delay(uint32_t) {}
-bool busBusy(const busDevice_t*, bool*) {return false;}
-bool busReadRegisterBuffer(const busDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
-bool busReadRegisterBufferStart(const busDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
-bool busWriteRegister(const busDevice_t*, uint8_t, uint8_t) {return true;}
-bool busWriteRegisterStart(const busDevice_t*, uint8_t, uint8_t) {return true;}
+void delay() {}
 
-void spiBusSetDivisor() {
+bool busBusy(const extDevice_t*, bool*) {return false;}
+bool busReadRegisterBuffer(const extDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
+bool busReadRegisterBufferStart(const extDevice_t*, uint8_t, uint8_t*, uint8_t) {return true;}
+bool busWriteRegister(const extDevice_t*, uint8_t, uint8_t) {return true;}
+bool busWriteRegisterStart(const extDevice_t*, uint8_t, uint8_t) {return true;}
+void busDeviceRegister(const extDevice_t*) {}
+
+uint16_t spiCalculateDivider()
+{
+    return 2;
 }
 
-void spiBusTransactionInit() {
+void spiSetClkDivisor()
+{
 }
 
-void spiPreinitByIO(IO_t) {
+void spiPreinitByIO(IO_t)
+{
 }
 
-void IOConfigGPIO() {
+void IOConfigGPIO()
+{
 }
 
-void IOHi() {
+void IOHi()
+{
 }
 
-IO_t IOGetByTag(ioTag_t) {
+IO_t IOGetByTag(ioTag_t)
+{
     return IO_NONE;
 }
 
-void IOInit() {
+void IOInit()
+{
 }
 
-void EXTIHandlerInit(extiCallbackRec_t *, extiHandlerCallback *) {
+void EXTIHandlerInit(extiCallbackRec_t *, extiHandlerCallback *)
+{
 }
 
-void EXTIConfig(IO_t, extiCallbackRec_t *, int, ioConfig_t, extiTrigger_t) {
+void EXTIConfig(IO_t, extiCallbackRec_t *, int, ioConfig_t, extiTrigger_t)
+{
 }
 
-void EXTIEnable(IO_t, bool) {
-}
+void EXTIEnable(IO_t)
+{}
+
+void EXTIDisable(IO_t)
+{}
 
 
 } // extern "C"

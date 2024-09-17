@@ -32,6 +32,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <math.h>
 
 #include "platform.h"
 #include "telemetry/telemetry.h"
@@ -45,7 +46,7 @@ static uint16_t calculateChecksum(const uint8_t *ibusPacket);
 #include "pg/pg_ids.h"
 #include "sensors/battery.h"
 #include "fc/rc_controls.h"
-#include "fc/config.h"
+#include "config/config.h"
 #include "sensors/gyro.h"
 #include "drivers/accgyro/accgyro.h"
 #include "fc/runtime_config.h"
@@ -138,26 +139,46 @@ static uint8_t getSensorID(ibusAddress_t address)
     return telemetryConfig()->flysky_sensors[index];
 }
 
-static uint8_t getSensorLength(uint8_t sensorID)
+#if defined(USE_TELEMETRY_IBUS_EXTENDED)
+static const uint8_t* getSensorStruct(uint8_t sensorType, uint8_t* itemCount)
 {
-    if (sensorID == IBUS_SENSOR_TYPE_PRES || (sensorID >= IBUS_SENSOR_TYPE_GPS_LAT && sensorID <= IBUS_SENSOR_TYPE_ALT_MAX)) {
+    const uint8_t* structure = 0;
+    if (sensorType == IBUS_SENSOR_TYPE_GPS_FULL) {
+        structure = FULL_GPS_IDS;
+        *itemCount = sizeof(FULL_GPS_IDS);
+    }
+    if (sensorType == IBUS_SENSOR_TYPE_VOLT_FULL) {
+        structure = FULL_VOLT_IDS;
+        *itemCount = sizeof(FULL_VOLT_IDS);
+    }
+    if (sensorType == IBUS_SENSOR_TYPE_ACC_FULL) {
+        structure = FULL_ACC_IDS;
+        *itemCount = sizeof(FULL_ACC_IDS);
+    }
+    return structure;
+}
+#endif //defined(USE_TELEMETRY_IBUS_EXTENDED)
+
+static uint8_t getSensorLength(uint8_t sensorType)
+{
+    if (sensorType == IBUS_SENSOR_TYPE_PRES || (sensorType >= IBUS_SENSOR_TYPE_GPS_LAT && sensorType <= IBUS_SENSOR_TYPE_ALT_MAX)) {
         return IBUS_4BYTE_SESNSOR;
     }
 #if defined(USE_TELEMETRY_IBUS_EXTENDED)
-    if (sensorID == IBUS_SENSOR_TYPE_GPS_FULL) {
-        return 14;
+    uint8_t itemCount;
+    const uint8_t* structure = getSensorStruct(sensorType, &itemCount);
+    if (structure != 0) {
+        uint8_t size = 0;
+        for (unsigned i = 0; i < itemCount; i++) {
+            size += getSensorLength(structure[i]);
+        }
+        return size;
     }
-    if (sensorID == IBUS_SENSOR_TYPE_VOLT_FULL) {
-        return 10;
-    }
-    if (sensorID == IBUS_SENSOR_TYPE_VOLT_FULL) {
-        return 12;
-    }
-#endif
+#endif //defined(USE_TELEMETRY_IBUS_EXTENDED)
     return IBUS_2BYTE_SESNSOR;
 }
 
-static uint8_t transmitIbusPacket()
+static uint8_t transmitIbusPacket(void)
 {
     unsigned frameLength = sendBuffer[0];
     if (frameLength == INVALID_IBUS_ADDRESS) {
@@ -189,28 +210,24 @@ static void setIbusSensorType(ibusAddress_t address)
     sendBuffer[3] = sensorLength;
 }
 
-static uint16_t getVoltage()
+static uint16_t getVoltage(void)
 {
-    uint16_t voltage = getBatteryVoltage();
-    if (telemetryConfig()->report_cell_voltage) {
-        voltage /= getBatteryCellCount();
-    }
-    return voltage;
+    return (telemetryConfig()->report_cell_voltage ? getBatteryAverageCellVoltage() : getBatteryVoltage());
 }
 
-static uint16_t getTemperature()
+static uint16_t getTemperature(void)
 {
     uint16_t temperature = gyroGetTemperature() * 10;
 #if defined(USE_BARO)
     if (sensors(SENSOR_BARO)) {
-        temperature = (uint16_t) ((baro.baroTemperature + 50) / 10);
+        temperature = lrintf(baro.temperature / 10.0f);
     }
 #endif
     return temperature + IBUS_TEMPERATURE_OFFSET;
 }
 
 
-static uint16_t getFuel()
+static uint16_t getFuel(void)
 {
     uint16_t fuel = 0;
     if (batteryConfig()->batteryCapacity > 0) {
@@ -221,7 +238,7 @@ static uint16_t getFuel()
     return fuel;
 }
 
-static uint16_t getRPM()
+static uint16_t getRPM(void)
 {
     uint16_t rpm = 0;
     if (ARMING_FLAG(ARMED)) {
@@ -234,16 +251,16 @@ static uint16_t getRPM()
     return rpm;
 }
 
-static uint16_t getMode()
+static uint16_t getMode(void)
 {
     uint16_t flightMode = 1; //Acro
-    if (FLIGHT_MODE(ANGLE_MODE)) {
+    if (FLIGHT_MODE(ANGLE_MODE | ALT_HOLD_MODE)) {
          flightMode = 0; //Stab
     }
     if (FLIGHT_MODE(PASSTHRU_MODE)) {
         flightMode = 3; //Auto
     }
-    if (FLIGHT_MODE(HEADFREE_MODE) || FLIGHT_MODE(MAG_MODE)) {
+    if (FLIGHT_MODE(HEADFREE_MODE | MAG_MODE)) {
         flightMode = 4; //Guided! (there in no HEAD, MAG so use Guided)
     }
     if (FLIGHT_MODE(HORIZON_MODE)) {
@@ -258,7 +275,7 @@ static uint16_t getMode()
 #if defined(USE_ACC)
 static int16_t getACC(uint8_t index)
 {
-    return (int16_t)((acc.accADC[index] * acc.dev.acc_1G_rec) * 1000);
+    return (int16_t)((acc.accADC.v[index] * acc.dev.acc_1G_rec) * 1000);
 }
 #endif
 
@@ -266,9 +283,8 @@ static int16_t getACC(uint8_t index)
 static void setCombinedFrame(uint8_t* bufferPtr, const uint8_t* structure, uint8_t itemCount)
 {
     uint8_t offset = 0;
-    uint8_t size = 0;
     for (unsigned i = 0; i < itemCount; i++) {
-        size = getSensorLength(structure[i]);
+        uint8_t size = getSensorLength(structure[i]);
         setValue(bufferPtr + offset, structure[i], size);
         offset += size;
     }
@@ -289,11 +305,9 @@ static bool setGPS(uint8_t sensorType, ibusTelemetry_s* value)
     }
     if (!result) return result;
 
-    uint16_t gpsFixType = 0;
-    uint16_t sats = 0;
     if (sensors(SENSOR_GPS)) {
-        gpsFixType = !STATE(GPS_FIX) ? 1 : (gpsSol.numSat < 5 ? 2 : 3);
-        sats = gpsSol.numSat;
+        uint16_t gpsFixType = !STATE(GPS_FIX) ? 1 : (gpsSol.numSat < GPS_MIN_SAT_COUNT ? 2 : 3);
+        uint16_t sats = gpsSol.numSat;
         if (STATE(GPS_FIX) || sensorType == IBUS_SENSOR_TYPE_GPS_STATUS) {
             result = true;
             switch (sensorType) {
@@ -336,35 +350,25 @@ static void setValue(uint8_t* bufferPtr, uint8_t sensorType, uint8_t length)
     ibusTelemetry_s value;
 
 #if defined(USE_TELEMETRY_IBUS_EXTENDED)
-    const uint8_t* structure = 0;
     uint8_t itemCount;
-    if (sensorType == IBUS_SENSOR_TYPE_GPS_FULL) {
-        structure = FULL_GPS_IDS;
-        itemCount = sizeof(FULL_GPS_IDS);
-    }
-    if (sensorType == IBUS_SENSOR_TYPE_VOLT_FULL) {
-        structure = FULL_VOLT_IDS;
-        itemCount = sizeof(FULL_VOLT_IDS);
-    }
-    if (sensorType == IBUS_SENSOR_TYPE_ACC_FULL) {
-        structure = FULL_ACC_IDS;
-        itemCount = sizeof(FULL_ACC_IDS);
-    }
+    const uint8_t* structure = getSensorStruct(sensorType, &itemCount);
     if (structure != 0) {
-        setCombinedFrame(bufferPtr, structure, sizeof(itemCount));
+        setCombinedFrame(bufferPtr, structure, itemCount);
         return;
     }
 #endif //defined(USE_TELEMETRY_IBUS_EXTENDED)
-
-#if defined(USE_GPS)
-    if (setGPS(sensorType, &value)) {
-        return;
-    }
-#endif //defined(USE_TELEMETRY_IBUS_EXTENDED)
-
+    //clear result
     for (unsigned i = 0; i < length; i++) {
         bufferPtr[i] = value.byte[i] = 0;
     }
+#if defined(USE_GPS)
+    if (setGPS(sensorType, &value)) {
+        for (unsigned i = 0; i < length; i++) {
+            bufferPtr[i] = value.byte[i];
+        }
+        return;
+    }
+#endif //defined(USE_TELEMETRY_IBUS_EXTENDED)
     switch (sensorType) {
         case IBUS_SENSOR_TYPE_EXTERNAL_VOLTAGE:
             value.uint16 = getVoltage();
@@ -418,10 +422,10 @@ static void setValue(uint8_t* bufferPtr, uint8_t sensorType, uint8_t length)
 #ifdef USE_BARO
         case IBUS_SENSOR_TYPE_ALT:
         case IBUS_SENSOR_TYPE_ALT_MAX:
-            value.int32 = baro.BaroAlt;
+            value.int32 = baro.altitude;
             break;
         case IBUS_SENSOR_TYPE_PRES:
-            value.uint32 = baro.baroPressure | (((uint32_t)getTemperature()) << 19);
+            value.uint32 = baro.pressure | (((uint32_t)getTemperature()) << 19);
             break;
 #endif
 #endif //defined(TELEMETRY_IBUS_EXTENDED)

@@ -45,7 +45,7 @@ extern "C" {
 
     #include "flight/pid.h"
 
-    #include "fc/config.h"
+    #include "config/config.h"
     #include "fc/controlrate_profile.h"
     #include "fc/rc_modes.h"
     #include "fc/rc_adjustments.h"
@@ -60,7 +60,8 @@ extern "C" {
 #include "unittest_macros.h"
 #include "gtest/gtest.h"
 
-void unsetArmingDisabled(armingDisableFlags_e flag) {
+void unsetArmingDisabled(armingDisableFlags_e flag)
+{
   UNUSED(flag);
 }
 
@@ -78,8 +79,8 @@ TEST_F(RcControlsModesTest, updateActivatedModesWithAllInputsAtMidde)
     rcModeUpdate(&mask);
 
     // and
-    memset(&rxRuntimeConfig, 0, sizeof(rxRuntimeConfig_t));
-    rxRuntimeConfig.channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT - NON_AUX_CHANNEL_COUNT;
+    memset(&rxRuntimeState, 0, sizeof(rxRuntimeState_t));
+    rxRuntimeState.channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT - NON_AUX_CHANNEL_COUNT;
 
     // and
     for (int index = AUX1; index < MAX_SUPPORTED_RC_CHANNEL_COUNT; index++) {
@@ -95,7 +96,7 @@ TEST_F(RcControlsModesTest, updateActivatedModesWithAllInputsAtMidde)
 #ifdef DEBUG_RC_CONTROLS
         printf("iteration: %d\n", index);
 #endif
-        EXPECT_EQ(false, IS_RC_MODE_ACTIVE((boxId_e)index));
+        EXPECT_FALSE(IS_RC_MODE_ACTIVE((boxId_e)index));
     }
 }
 
@@ -152,8 +153,8 @@ TEST_F(RcControlsModesTest, updateActivatedModesUsingValidAuxConfigurationAndRXV
     rcModeUpdate(&mask);
 
     // and
-    memset(&rxRuntimeConfig, 0, sizeof(rxRuntimeConfig_t));
-    rxRuntimeConfig.channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT - NON_AUX_CHANNEL_COUNT;
+    memset(&rxRuntimeState, 0, sizeof(rxRuntimeState_t));
+    rxRuntimeState.channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT - NON_AUX_CHANNEL_COUNT;
 
     // and
     for (int index = AUX1; index < MAX_SUPPORTED_RC_CHANNEL_COUNT; index++) {
@@ -202,37 +203,44 @@ static int callCounts[CALL_COUNT_ITEM_COUNT];
 #define CALL_COUNTER(item) (callCounts[item])
 
 extern "C" {
-void beeperConfirmationBeeps(uint8_t) {
+void beeperConfirmationBeeps(uint8_t)
+{
     callCounts[COUNTER_QUEUE_CONFIRMATION_BEEP]++;
 }
 
-void beeper(beeperMode_e mode) {
+void beeper(beeperMode_e mode)
+{
     UNUSED(mode);
 }
 
-void changeControlRateProfile(uint8_t) {
+void changeControlRateProfile(uint8_t)
+{
     callCounts[COUNTER_CHANGE_CONTROL_RATE_PROFILE]++;
 }
 
 }
 
-void resetCallCounters(void) {
+void resetCallCounters(void)
+{
     memset(&callCounts, 0, sizeof(callCounts));
 }
 
 uint32_t fixedMillis;
 
 extern "C" {
-uint32_t millis(void) {
+uint32_t millis(void)
+{
     return fixedMillis;
 }
 
-uint32_t micros(void) {
+uint32_t micros(void)
+{
     return fixedMillis * 1000;
 }
 }
 
-void resetMillis(void) {
+void resetMillis(void)
+{
     fixedMillis = 0;
 }
 
@@ -252,16 +260,11 @@ extern "C" {
 class RcControlsAdjustmentsTest : public ::testing::Test {
 protected:
     controlRateConfig_t controlRateConfig = {
-            .rcRates[FD_ROLL] = 90,
-            .rcRates[FD_PITCH] = 90,
-            .rcExpo[FD_ROLL] = 0,
-            .rcExpo[FD_PITCH] = 0,
-            .thrMid8 = 0,
-            .thrExpo8 = 0,
-            .rates = {0, 0, 0},
-            .dynThrPID = 0,
-            .rcExpo[FD_YAW] = 0,
-            .tpa_breakpoint = 0
+        .thrMid8 = 0,
+        .thrExpo8 = 0,
+        .rcRates = {[FD_ROLL] = 90, [FD_PITCH] = 90},
+        .rcExpo = {[FD_ROLL] = 0, [FD_PITCH] = 0, [FD_YAW] = 0},
+        .rates = {0, 0, 0},
     };
 
     channelRange_t fullRange = {
@@ -287,8 +290,6 @@ protected:
         controlRateConfig.rates[0] = 0;
         controlRateConfig.rates[1] = 0;
         controlRateConfig.rates[2] = 0;
-        controlRateConfig.dynThrPID = 0;
-        controlRateConfig.tpa_breakpoint = 0;
 
         PG_RESET(adjustmentRanges);
         adjustmentRangesIndex = 0;
@@ -351,23 +352,18 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsSticksInMiddle)
     EXPECT_EQ(90, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(90, controlRateConfig.rcRates[FD_PITCH]);
     EXPECT_EQ(0, CALL_COUNTER(COUNTER_QUEUE_CONFIRMATION_BEEP));
-    EXPECT_EQ(true, adjustmentState->ready);
+    EXPECT_TRUE(adjustmentState->ready);
 }
 
 TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp)
 {
     // given
     controlRateConfig_t controlRateConfig = {
-            .rcRates[FD_ROLL] = 90,
-            .rcRates[FD_PITCH] = 90,
-            .rcExpo[FD_ROLL] = 0,
-            .rcExpo[FD_PITCH] = 0,
-            .thrMid8 = 0,
-            .thrExpo8 = 0,
-            .rates = {0,0,0},
-            .dynThrPID = 0,
-            .rcExpo[FD_YAW] = 0,
-            .tpa_breakpoint = 0
+        .thrMid8 = 0,
+        .thrExpo8 = 0,
+        .rcRates = {[FD_ROLL] = 90, [FD_PITCH] = 90},
+        .rcExpo = {[FD_ROLL] = 0, [FD_PITCH] = 0, [FD_YAW] = 0},
+        .rates = {0,0,0},
     };
 
     // and
@@ -401,7 +397,7 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp
     EXPECT_EQ(91, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(91, controlRateConfig.rcRates[FD_PITCH]);
     EXPECT_EQ(1, CALL_COUNTER(COUNTER_QUEUE_CONFIRMATION_BEEP));
-    EXPECT_EQ(false, adjustmentState->ready);
+    EXPECT_FALSE(adjustmentState->ready);
 
     //
     // now pretend a short amount of time has passed, but not enough time to allow the value to have been increased
@@ -415,7 +411,7 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp
 
     EXPECT_EQ(91, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(91, controlRateConfig.rcRates[FD_PITCH]);
-    EXPECT_EQ(false, adjustmentState->ready);
+    EXPECT_FALSE(adjustmentState->ready);
 
 
     //
@@ -434,7 +430,7 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp
 
     EXPECT_EQ(91, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(91, controlRateConfig.rcRates[FD_PITCH]);
-    EXPECT_EQ(true, adjustmentState->ready);
+    EXPECT_TRUE(adjustmentState->ready);
 
 
     //
@@ -453,7 +449,7 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp
     EXPECT_EQ(92, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(92, controlRateConfig.rcRates[FD_PITCH]);
     EXPECT_EQ(2, CALL_COUNTER(COUNTER_QUEUE_CONFIRMATION_BEEP));
-    EXPECT_EQ(false, adjustmentState->ready);
+    EXPECT_FALSE(adjustmentState->ready);
 
     //
     // leaving the switch up, after the original timer would have reset the state should now NOT cause
@@ -469,7 +465,7 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp
     // then
     EXPECT_EQ(92, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(92, controlRateConfig.rcRates[FD_PITCH]);
-    EXPECT_EQ(false, adjustmentState->ready);
+    EXPECT_FALSE(adjustmentState->ready);
 
     //
     // should still not be able to be increased
@@ -484,7 +480,7 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp
     // then
     EXPECT_EQ(92, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(92, controlRateConfig.rcRates[FD_PITCH]);
-    EXPECT_EQ(false, adjustmentState->ready);
+    EXPECT_FALSE(adjustmentState->ready);
 
     //
     // 500ms has now passed since the switch was returned to the middle, now that
@@ -502,7 +498,7 @@ TEST_F(RcControlsAdjustmentsTest, processRcAdjustmentsWithRcRateFunctionSwitchUp
     EXPECT_EQ(93, controlRateConfig.rcRates[FD_ROLL]);
     EXPECT_EQ(93, controlRateConfig.rcRates[FD_PITCH]);
     EXPECT_EQ(3, CALL_COUNTER(COUNTER_QUEUE_CONFIRMATION_BEEP));
-    EXPECT_EQ(false, adjustmentState->ready);
+    EXPECT_FALSE(adjustmentState->ready);
 }
 
 #define ADJUSTMENT_RATE_PROFILE_INDEX 12
@@ -543,7 +539,7 @@ TEST_F(RcControlsAdjustmentsTest, processPIDIncreasePidController0)
 {
     // given
     pidProfile_t pidProfile;
-    memset(&pidProfile, 0, sizeof (pidProfile));
+    memset(&pidProfile, 0, sizeof(pidProfile));
     pidProfile.pid[PID_PITCH].P = 0;
     pidProfile.pid[PID_PITCH].I = 10;
     pidProfile.pid[PID_PITCH].D = 20;
@@ -553,9 +549,14 @@ TEST_F(RcControlsAdjustmentsTest, processPIDIncreasePidController0)
     pidProfile.pid[PID_YAW].P = 7;
     pidProfile.pid[PID_YAW].I = 17;
     pidProfile.pid[PID_YAW].D = 27;
+
+    pidProfile.d_min[FD_PITCH] = 19;
+    pidProfile.d_min[FD_ROLL] = 19;
+    pidProfile.d_min[FD_YAW] = 19;
+
     // and
     controlRateConfig_t controlRateConfig;
-    memset(&controlRateConfig, 0, sizeof (controlRateConfig));
+    memset(&controlRateConfig, 0, sizeof(controlRateConfig));
 
     const timedAdjustmentState_t *adjustmentState1 = configureStepwiseAdjustment(AUX1 - NON_AUX_CHANNEL_COUNT, ADJUSTMENT_PITCH_ROLL_P_INDEX);
     const timedAdjustmentState_t *adjustmentState2 = configureStepwiseAdjustment(AUX2 - NON_AUX_CHANNEL_COUNT, ADJUSTMENT_PITCH_ROLL_I_INDEX);
@@ -585,23 +586,26 @@ TEST_F(RcControlsAdjustmentsTest, processPIDIncreasePidController0)
 
     // then
     EXPECT_EQ(6, CALL_COUNTER(COUNTER_QUEUE_CONFIRMATION_BEEP));
-    EXPECT_EQ(false, adjustmentState1->ready);
-    EXPECT_EQ(false, adjustmentState2->ready);
-    EXPECT_EQ(false, adjustmentState3->ready);
-    EXPECT_EQ(false, adjustmentState4->ready);
-    EXPECT_EQ(false, adjustmentState5->ready);
-    EXPECT_EQ(false, adjustmentState6->ready);
+    EXPECT_FALSE(adjustmentState1->ready);
+    EXPECT_FALSE(adjustmentState2->ready);
+    EXPECT_FALSE(adjustmentState3->ready);
+    EXPECT_FALSE(adjustmentState4->ready);
+    EXPECT_FALSE(adjustmentState5->ready);
+    EXPECT_FALSE(adjustmentState6->ready);
 
     // and
     EXPECT_EQ(1,  pidProfile.pid[PID_PITCH].P);
     EXPECT_EQ(11, pidProfile.pid[PID_PITCH].I);
-    EXPECT_EQ(21, pidProfile.pid[PID_PITCH].D);
+    EXPECT_EQ(20, pidProfile.pid[PID_PITCH].D);
+    EXPECT_EQ(20, pidProfile.d_min[FD_PITCH]);
     EXPECT_EQ(6,  pidProfile.pid[PID_ROLL].P);
     EXPECT_EQ(16, pidProfile.pid[PID_ROLL].I);
-    EXPECT_EQ(26, pidProfile.pid[PID_ROLL].D);
+    EXPECT_EQ(25, pidProfile.pid[PID_ROLL].D);
+    EXPECT_EQ(20, pidProfile.d_min[FD_ROLL]);
     EXPECT_EQ(8,  pidProfile.pid[PID_YAW].P);
     EXPECT_EQ(18, pidProfile.pid[PID_YAW].I);
-    EXPECT_EQ(28, pidProfile.pid[PID_YAW].D);
+    EXPECT_EQ(27, pidProfile.pid[PID_YAW].D);
+    EXPECT_EQ(20, pidProfile.d_min[FD_YAW]);
 }
 
 extern "C" {
@@ -610,7 +614,7 @@ void saveConfigAndNotify(void) {}
 void initRcProcessing(void) {}
 void changePidProfile(uint8_t) {}
 void pidInitConfig(const pidProfile_t *) {}
-void accSetCalibrationCycles(uint16_t) {}
+void accStartCalibration(void) {}
 void gyroStartCalibration(bool isFirstArmingCalibration)
 {
     UNUSED(isFirstArmingCalibration);
@@ -620,18 +624,20 @@ void handleInflightCalibrationStickPosition(void) {}
 bool featureIsEnabled(uint32_t) { return false;}
 bool sensors(uint32_t) { return false;}
 void tryArm(void) {}
-void disarm(void) {}
+void disarm(flightLogDisarmReason_e) {}
 void dashboardDisablePageCycling() {}
 void dashboardEnablePageCycling() {}
 
 bool failsafeIsActive() { return false; }
 bool rxIsReceivingSignal() { return true; }
+bool failsafeIsReceivingRxData() { return true; }
 
-uint8_t getCurrentControlRateProfileIndex(void) {
+uint8_t getCurrentControlRateProfileIndex(void)
+{
     return 0;
 }
 void GPS_reset_home_position(void) {}
-void baroSetCalibrationCycles(uint16_t) {}
+void baroSetGroundLevel(void) {}
 
 void blackboxLogEvent(FlightLogEvent, flightLogEventData_t *) {}
 
@@ -640,18 +646,22 @@ uint8_t armingFlags = 0;
 uint16_t flightModeFlags = 0;
 int16_t heading;
 uint8_t stateFlags = 0;
-int16_t rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
+float rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 pidProfile_t *currentPidProfile;
-rxRuntimeConfig_t rxRuntimeConfig;
+rxRuntimeState_t rxRuntimeState;
 PG_REGISTER(blackboxConfig_t, blackboxConfig, PG_BLACKBOX_CONFIG, 0);
 PG_REGISTER(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 2);
 void resetArmingDisabled(void) {}
-timeDelta_t getTaskDeltaTime(cfTaskId_e) { return 20000; }
-armingDisableFlags_e getArmingDisableFlags(void) {
+timeDelta_t getTaskDeltaTimeUs(taskId_e) { return 20000; }
+armingDisableFlags_e getArmingDisableFlags(void)
+{
     return (armingDisableFlags_e) 0;
 }
 bool isTryingToArm(void) { return false; }
 void resetTryingToArm(void) {}
 void setLedProfile(uint8_t profile) { UNUSED(profile); }
 uint8_t getLedProfile(void) { return 0; }
+void compassStartCalibration(void) {}
+void pinioBoxTaskControl(void) {}
+void schedulerIgnoreTaskExecTime(void) {}
 }
